@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include "pmi/shared.h"
+#include "pmi/strutil.h"
 #include "pmi/symbolizer.h"
 
 struct pmi_symbol {
@@ -136,7 +137,8 @@ static struct pmi_module_cache *load_module(struct pmi_symbolizer *symbolizer,
 	}
 	cache = &symbolizer->modules[symbolizer->count];
 	memset(cache, 0, sizeof(*cache));
-	snprintf(cache->path, sizeof(cache->path), "%s", path);
+	if (pmi_copy_cstr(cache->path, sizeof(cache->path), path) != 0)
+		return NULL;
 
 	fd = open(path, O_RDONLY);
 	if (fd < 0)
@@ -196,9 +198,9 @@ static int resolve_module(pid_t pid, uint64_t ip, char *module, size_t module_ca
 			path++;
 		path[strcspn(path, "\r\n")] = '\0';
 		if (*path == '\0')
-			snprintf(module, module_cap, "[anon]");
+			pmi_copy_cstr_trunc(module, module_cap, "[anon]");
 		else
-			snprintf(module, module_cap, "%s", path);
+			pmi_copy_cstr_trunc(module, module_cap, path);
 		*relative_ip = ip - start + offset;
 		fclose(fp);
 		return 0;
@@ -268,7 +270,7 @@ int pmi_symbolizer_symbolize_ip(struct pmi_symbolizer *symbolizer, pid_t pid,
 
 	err = resolve_module(pid, ip, module, module_cap, &relative_ip);
 	if (err) {
-		snprintf(module, module_cap, "[unknown]");
+		pmi_copy_cstr_trunc(module, module_cap, "[unknown]");
 		snprintf(symbol, symbol_cap, "0x%" PRIx64, ip);
 		return err;
 	}

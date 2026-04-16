@@ -14,8 +14,12 @@ LIBBPF_PKG_LIBS ?= $(shell pkg-config --libs libbpf 2>/dev/null)
 CC ?= clang
 CLANG ?= clang
 STRIP ?= llvm-strip
+CC_IS_GCC := $(shell $(CC) -dM -E - < /dev/null 2>/dev/null | grep -q __GNUC__ && ! grep -q __clang__ && echo 1 || echo 0)
 
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=c11
+ifeq ($(CC_IS_GCC),1)
+CFLAGS += -Wno-format-truncation
+endif
 LDFLAGS += -lelf -lz
 
 ifeq ($(USE_SYSTEM_LIBBPF),1)

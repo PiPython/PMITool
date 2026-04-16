@@ -6,6 +6,7 @@
 
 #include "pmi/record.h"
 #include "pmi/shared.h"
+#include "pmi/strutil.h"
 
 struct event_sum {
 	char name[PMI_MAX_EVENT_NAME];
@@ -44,10 +45,10 @@ static struct report_entry *find_or_add(struct report_entry **entries, size_t *c
 	}
 
 	memset(&(*entries)[*count], 0, sizeof(**entries));
-	snprintf((*entries)[*count].module, sizeof((*entries)[*count].module), "%s",
-		 module);
-	snprintf((*entries)[*count].symbol, sizeof((*entries)[*count].symbol), "%s",
-		 symbol);
+	pmi_copy_cstr_trunc((*entries)[*count].module,
+			    sizeof((*entries)[*count].module), module);
+	pmi_copy_cstr_trunc((*entries)[*count].symbol,
+			    sizeof((*entries)[*count].symbol), symbol);
 	return &(*entries)[(*count)++];
 }
 
@@ -65,8 +66,8 @@ static void add_event_sum(struct report_entry *entry, const char *name, uint64_t
 	if (entry->event_count >= PMI_MAX_EVENTS)
 		return;
 
-	snprintf(entry->events[entry->event_count].name,
-		 sizeof(entry->events[entry->event_count].name), "%s", name);
+	pmi_copy_cstr_trunc(entry->events[entry->event_count].name,
+			    sizeof(entry->events[entry->event_count].name), name);
 	entry->events[entry->event_count].total = value;
 	entry->event_count++;
 }
@@ -88,7 +89,7 @@ static void parse_event_blob(struct report_entry *entry, char *blob)
 			continue;
 		if (at && at < eq)
 			*at = '\0';
-		snprintf(name, sizeof(name), "%s", token);
+		pmi_copy_cstr_trunc(name, sizeof(name), token);
 		value = strtoull(eq + 1, NULL, 10);
 		add_event_sum(entry, name, value);
 	}

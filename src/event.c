@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "pmi/event.h"
+#include "pmi/strutil.h"
 
 #define PMI_MAX_FORMAT_RANGES 8
 
@@ -19,19 +20,6 @@ struct pmi_format_field {
 	} ranges[PMI_MAX_FORMAT_RANGES];
 	size_t nranges;
 };
-
-static int copy_cstr(char *dst, size_t cap, const char *src)
-{
-	size_t len;
-
-	if (!dst || !src || cap == 0)
-		return -EINVAL;
-	len = strlen(src);
-	if (len >= cap)
-		return -E2BIG;
-	memcpy(dst, src, len + 1);
-	return 0;
-}
 
 static int read_first_line(const char *path, char *buf, size_t cap)
 {
@@ -201,10 +189,10 @@ static int resolve_event_expr(struct pmi_event_spec *spec, const char *sysfs_roo
 	int err;
 
 	memset(spec, 0, sizeof(*spec));
-	err = copy_cstr(spec->name, sizeof(spec->name), name);
+	err = pmi_copy_cstr(spec->name, sizeof(spec->name), name);
 	if (err)
 		return err;
-	err = copy_cstr(spec->pmu, sizeof(spec->pmu), pmu);
+	err = pmi_copy_cstr(spec->pmu, sizeof(spec->pmu), pmu);
 	if (err)
 		return err;
 	err = read_pmu_type(sysfs_root, pmu, &spec->type);
@@ -281,7 +269,7 @@ static int resolve_alias(struct pmi_event_spec *spec, const char *sysfs_root,
 				closedir(dir);
 				return -EEXIST;
 			}
-			err = copy_cstr(pmu, sizeof(pmu), ent->d_name);
+			err = pmi_copy_cstr(pmu, sizeof(pmu), ent->d_name);
 			if (err) {
 				closedir(dir);
 				return err;
@@ -306,7 +294,7 @@ int pmi_event_list_resolve(struct pmi_event_list *list, char *const *inputs,
 		return -EINVAL;
 	memset(list, 0, sizeof(*list));
 
-	err = copy_cstr(list->sysfs_root, sizeof(list->sysfs_root),
+	err = pmi_copy_cstr(list->sysfs_root, sizeof(list->sysfs_root),
 			sysfs_root ? sysfs_root : "/sys/bus/event_source/devices");
 	if (err)
 		return err;

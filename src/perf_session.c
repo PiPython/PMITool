@@ -17,6 +17,7 @@
 
 #include "pmi/perf_session.h"
 #include "pmi/procfs.h"
+#include "pmi/strutil.h"
 
 #define PMI_PERF_BUFFER_PAGES 8
 
@@ -337,7 +338,8 @@ int pmi_perf_session_drain(struct pmi_perf_session *session, pmi_perf_sample_cb 
 						     &sample);
 			if (err)
 				break;
-			snprintf(sample.comm, sizeof(sample.comm), "%s", session->comm);
+			pmi_copy_cstr_trunc(sample.comm, sizeof(sample.comm),
+					    session->comm);
 			sample.lost_flags = session->pending_lost ? PMI_LOST_PERF : 0;
 			session->pending_lost = false;
 			fill_sample_names(session, &sample);
