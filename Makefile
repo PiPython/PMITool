@@ -64,7 +64,9 @@ TEST_SRC := \
 	tests/test_event.c \
 	tests/test_perf_decode.c \
 	tests/test_joiner.c \
-	tests/test_symbolizer.c
+	tests/test_symbolizer.c \
+	tests/test_output_v2.c \
+	tests/test_report_v2.c
 
 TEST_BIN := $(patsubst tests/%.c,$(BUILD_DIR)/%,$(TEST_SRC))
 

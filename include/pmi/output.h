@@ -2,18 +2,21 @@
 #define PMI_OUTPUT_H
 
 #include <stdio.h>
+#include <stdint.h>
 
 #include "pmi/joiner.h"
 
 struct pmi_output_writer {
 	FILE *fp;
+	uint64_t seq;
+	uint64_t period_insn;
 };
 
-int pmi_output_open(struct pmi_output_writer *writer, const char *path);
+int pmi_output_open(struct pmi_output_writer *writer, const char *path,
+		    uint64_t period_insn);
 int pmi_output_write_sample(struct pmi_output_writer *writer,
 			    const struct pmi_joined_sample *sample,
-			    const char *module, const char *symbol,
-			    const char *folded_stack);
+			    const char *symbol, const char *stack);
 void pmi_output_close(struct pmi_output_writer *writer);
 
 #endif

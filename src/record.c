@@ -3,6 +3,8 @@
 #endif
 
 #include <errno.h>
+#include <getopt.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
@@ -22,6 +24,7 @@
 #include "pmi/perf_session.h"
 #include "pmi/procfs.h"
 #include "pmi/record.h"
+#include "pmi/strutil.h"
 #include "pmi/symbolizer.h"
 
 #define PMI_MAX_TRACKED_TIDS 1024
@@ -41,6 +44,30 @@ struct record_runtime {
 	pid_t child_pid;
 };
 
+static void record_usage(FILE *stream)
+{
+	fprintf(stream,
+		"usage: pmi record (-p <pid> | -t <tid> | -c <cmd>) -o <file> [options]\n"
+		"\n"
+		"options:\n"
+		"  -p, --pid <pid>            attach to all threads in a process\n"
+		"  -t, --tid <tid>            attach to one thread\n"
+		"  -c, --cmd <cmd>            spawn and record a shell command\n"
+		"  -o, --out <file>           write raw v2 samples to a file\n"
+		"  -n, --period-insn <count>  sampling period in retired instructions\n"
+		"                             default: 1000000\n"
+		"  -e <raw-list>              raw PMU events, e.g. -e r0010,r0011\n"
+		"                             may be repeated; only CPU PMU raw events are supported\n"
+		"  -s, --stack <top|full>     stack mode; default: top\n"
+		"  -k, --kernel-stack <on|off>\n"
+		"                             capture kernel stack in BPF, default: off\n"
+		"  -h, --help                 show this help\n"
+		"\n"
+		"examples:\n"
+		"  pmi record -p 1234 -o out.pmi\n"
+		"  pmi record -c './bench' -n 100000 -e r0010,r0011 -s full -o out.pmi\n");
+}
+
 static void on_signal(int signo)
 {
 	(void)signo;
@@ -58,33 +85,79 @@ static bool session_exists(const struct record_runtime *rt, pid_t tid)
 	return false;
 }
 
+static void normalize_symbol(char *symbol)
+{
+	char *plus;
+
+	if (!symbol || symbol[0] == '\0' || strncmp(symbol, "0x", 2) == 0)
+		return;
+
+	plus = strstr(symbol, "+0x");
+	if (plus)
+		*plus = '\0';
+}
+
+static void format_stack_ips(const uint64_t *ips, size_t depth, char *out,
+			     size_t out_cap)
+{
+	size_t i;
+	size_t len = 0;
+	bool wrote = false;
+
+	if (!out || out_cap == 0)
+		return;
+
+	out[0] = '\0';
+	for (i = 0; i < depth; ++i) {
+		int written;
+
+		if (ips[i] == 0)
+			continue;
+		written = snprintf(out + len, out_cap - len, "%s0x%" PRIx64,
+				   wrote ? ";" : "", ips[i]);
+		if (written < 0 || (size_t)written >= out_cap - len)
+			break;
+		len += (size_t)written;
+		wrote = true;
+	}
+
+	if (!wrote)
+		pmi_copy_cstr_trunc(out, out_cap, "-");
+}
+
 static int on_joined_sample(const struct pmi_joined_sample *sample, void *ctx)
 {
 	struct record_runtime *rt = ctx;
-	struct pmi_joined_sample local = *sample;
-	char module[PMI_MAX_MODULE_LEN] = "-";
-	char symbol[PMI_MAX_SYMBOL_LEN] = "-";
-	char folded[PMI_MAX_FOLDED_LEN] = "-";
+	char module[PMI_MAX_MODULE_LEN];
+	char symbol[PMI_MAX_SYMBOL_LEN];
+	char stack[PMI_MAX_STACK_TEXT_LEN];
 	uint64_t ips[PMI_MAX_STACK_DEPTH] = { 0 };
-	uint64_t ip = sample->bpf.ip ? sample->bpf.ip : sample->perf.ip;
-	pid_t pid = sample->perf.pid ? sample->perf.pid : (pid_t)sample->bpf.pid;
+	uint64_t ip;
+	pid_t pid;
 
-	if (ip)
+	if (!sample || sample->perf.event_count == 0)
+		return 0;
+
+	ip = sample->bpf.ip ? sample->bpf.ip : sample->perf.ip;
+	pid = sample->perf.pid ? sample->perf.pid : (pid_t)sample->bpf.pid;
+	pmi_copy_cstr_trunc(symbol, sizeof(symbol), ip ? "-" : "0x0");
+	pmi_copy_cstr_trunc(stack, sizeof(stack), "-");
+
+	if (ip) {
 		pmi_symbolizer_symbolize_ip(rt->symbolizer, pid, ip, module,
 					    sizeof(module), symbol,
 					    sizeof(symbol));
-	if (rt->opts.stack_mode == PMI_STACK_FULL && sample->bpf.user_stack_id >= 0) {
-		if (pmi_bpf_runtime_read_stack(&rt->bpf, sample->bpf.user_stack_id, ips,
-					       PMI_MAX_STACK_DEPTH) == 0) {
-			pmi_symbolizer_symbolize_stack(rt->symbolizer, pid, ips,
-						       PMI_MAX_STACK_DEPTH, folded,
-						       sizeof(folded));
-		} else {
-			local.lost_flags |= PMI_LOST_STACK;
-		}
+		normalize_symbol(symbol);
 	}
 
-	return pmi_output_write_sample(&rt->writer, &local, module, symbol, folded);
+	if (rt->opts.stack_mode == PMI_STACK_FULL && sample->bpf.user_stack_id >= 0) {
+		if (pmi_bpf_runtime_read_stack(&rt->bpf, sample->bpf.user_stack_id, ips,
+					       PMI_MAX_STACK_DEPTH) == 0)
+			format_stack_ips(ips, PMI_MAX_STACK_DEPTH, stack,
+					sizeof(stack));
+	}
+
+	return pmi_output_write_sample(&rt->writer, sample, symbol, stack);
 }
 
 static int on_perf_sample(const struct pmi_perf_sample *sample, void *ctx)
@@ -163,63 +236,187 @@ static int spawn_command(const char *cmd, pid_t *pid_out)
 	return 0;
 }
 
+static int parse_pid_value(const char *text, pid_t *out)
+{
+	char *end = NULL;
+	long value;
+
+	if (!text || !out)
+		return -EINVAL;
+
+	value = strtol(text, &end, 10);
+	if (!end || *end != '\0' || value <= 0 || value > INT_MAX)
+		return -EINVAL;
+
+	*out = (pid_t)value;
+	return 0;
+}
+
+static int parse_u64_value(const char *text, uint64_t *out)
+{
+	char *end = NULL;
+
+	if (!text || !out)
+		return -EINVAL;
+
+	*out = strtoull(text, &end, 10);
+	if (!end || *end != '\0' || *out == 0)
+		return -EINVAL;
+
+	return 0;
+}
+
+static int append_raw_event_tokens(struct pmi_record_options *opts, const char *arg)
+{
+	char copy[PMI_MAX_LINE_LEN];
+	char *cursor;
+	char *token;
+
+	if (!opts || !arg)
+		return -EINVAL;
+	if (strlen(arg) >= sizeof(copy))
+		return -E2BIG;
+
+	strcpy(copy, arg);
+	cursor = copy;
+	while ((token = strsep(&cursor, ",")) != NULL) {
+		if (*token == '\0')
+			return -EINVAL;
+		if (opts->raw_event_count >= PMI_MAX_EVENTS - 1)
+			return -E2BIG;
+		if (pmi_copy_cstr(opts->raw_event_tokens[opts->raw_event_count],
+				  sizeof(opts->raw_event_tokens[0]), token) != 0)
+			return -E2BIG;
+		opts->raw_event_count++;
+	}
+
+	return 0;
+}
+
+static int parse_stack_mode(const char *mode, enum pmi_stack_mode *out)
+{
+	if (strcmp(mode, "top") == 0) {
+		*out = PMI_STACK_TOP;
+		return 0;
+	}
+	if (strcmp(mode, "full") == 0) {
+		*out = PMI_STACK_FULL;
+		return 0;
+	}
+	return -EINVAL;
+}
+
+static int parse_onoff(const char *text, bool *out)
+{
+	if (strcmp(text, "on") == 0) {
+		*out = true;
+		return 0;
+	}
+	if (strcmp(text, "off") == 0) {
+		*out = false;
+		return 0;
+	}
+	return -EINVAL;
+}
+
 static int parse_record_options(int argc, char **argv, struct pmi_record_options *opts)
 {
-	int i;
+	static const struct option long_options[] = {
+		{ "pid", required_argument, NULL, 'p' },
+		{ "tid", required_argument, NULL, 't' },
+		{ "cmd", required_argument, NULL, 'c' },
+		{ "out", required_argument, NULL, 'o' },
+		{ "period-insn", required_argument, NULL, 'n' },
+		{ "stack", required_argument, NULL, 's' },
+		{ "kernel-stack", required_argument, NULL, 'k' },
+		{ "help", no_argument, NULL, 'h' },
+		{ "event", required_argument, NULL, 1000 },
+		{ 0, 0, 0, 0 },
+	};
+	int opt;
 
 	memset(opts, 0, sizeof(*opts));
 	opts->period = 1000000;
 	opts->stack_mode = PMI_STACK_TOP;
 	opts->mmap_pages = 8;
 	opts->poll_timeout_ms = 200;
+	opterr = 0;
+	optind = 1;
 
-	for (i = 1; i < argc; ++i) {
-		if (strcmp(argv[i], "--pid") == 0 && i + 1 < argc) {
-			opts->pid = (pid_t)strtol(argv[++i], NULL, 10);
-		} else if (strcmp(argv[i], "--tid") == 0 && i + 1 < argc) {
-			opts->tid = (pid_t)strtol(argv[++i], NULL, 10);
-		} else if (strcmp(argv[i], "--cmd") == 0 && i + 1 < argc) {
-			opts->cmd = argv[++i];
-		} else if (strcmp(argv[i], "--event") == 0 && i + 1 < argc) {
-			if (opts->event_input_count >= PMI_MAX_EVENTS - 1)
-				return -E2BIG;
-			opts->event_inputs[opts->event_input_count++] = argv[++i];
-		} else if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
-			opts->output_path = argv[++i];
-		} else if (strcmp(argv[i], "--period-insn") == 0 && i + 1 < argc) {
-			opts->period = strtoull(argv[++i], NULL, 10);
-		} else if (strcmp(argv[i], "--stack") == 0 && i + 1 < argc) {
-			const char *mode = argv[++i];
-
-			if (strcmp(mode, "top") == 0)
-				opts->stack_mode = PMI_STACK_TOP;
-			else if (strcmp(mode, "full") == 0)
-				opts->stack_mode = PMI_STACK_FULL;
-			else
+	while ((opt = getopt_long(argc, argv, "p:t:c:o:n:e:s:k:h", long_options,
+				  NULL)) != -1) {
+		switch (opt) {
+		case 'p':
+			if (parse_pid_value(optarg, &opts->pid) != 0) {
+				fprintf(stderr, "invalid pid: %s\n", optarg);
 				return -EINVAL;
-		} else if (strcmp(argv[i], "--kernel-stack") == 0 && i + 1 < argc) {
-			const char *onoff = argv[++i];
-
-			if (strcmp(onoff, "on") == 0)
-				opts->capture_kernel_stack = true;
-			else if (strcmp(onoff, "off") == 0)
-				opts->capture_kernel_stack = false;
-			else
+			}
+			break;
+		case 't':
+			if (parse_pid_value(optarg, &opts->tid) != 0) {
+				fprintf(stderr, "invalid tid: %s\n", optarg);
 				return -EINVAL;
-		} else if (strcmp(argv[i], "--help") == 0) {
-			fprintf(stdout,
-				"usage: pmi record --pid <pid>|--tid <tid>|--cmd <cmd> "
-				"[--event spec]... --out <file>\n");
+			}
+			break;
+		case 'c':
+			opts->cmd = optarg;
+			break;
+		case 'o':
+			opts->output_path = optarg;
+			break;
+		case 'n':
+			if (parse_u64_value(optarg, &opts->period) != 0) {
+				fprintf(stderr, "invalid instruction period: %s\n",
+					optarg);
+				return -EINVAL;
+			}
+			break;
+		case 'e':
+			if (append_raw_event_tokens(opts, optarg) != 0) {
+				fprintf(stderr, "invalid raw event list: %s\n", optarg);
+				return -EINVAL;
+			}
+			break;
+		case 's':
+			if (parse_stack_mode(optarg, &opts->stack_mode) != 0) {
+				fprintf(stderr, "invalid stack mode: %s\n", optarg);
+				return -EINVAL;
+			}
+			break;
+		case 'k':
+			if (parse_onoff(optarg, &opts->capture_kernel_stack) != 0) {
+				fprintf(stderr, "invalid kernel stack mode: %s\n",
+					optarg);
+				return -EINVAL;
+			}
+			break;
+		case 'h':
+			record_usage(stdout);
 			return 2;
-		} else {
+		case 1000:
+			fprintf(stderr,
+				"--event is no longer supported; use -e r0010,r0011\n");
+			return -EINVAL;
+		case '?':
+		default:
+			fprintf(stderr, "unknown record option: %s\n",
+				optind > 0 && optind - 1 < argc ? argv[optind - 1] : "?");
 			return -EINVAL;
 		}
 	}
 
-	if (!opts->output_path)
+	if (optind != argc) {
+		fprintf(stderr, "unexpected positional argument: %s\n", argv[optind]);
 		return -EINVAL;
-	if (!!opts->pid + !!opts->tid + !!opts->cmd != 1)
+	}
+	if (!opts->output_path) {
+		fprintf(stderr, "-o/--out is required\n");
 		return -EINVAL;
+	}
+	if (!!opts->pid + !!opts->tid + !!opts->cmd != 1) {
+		fprintf(stderr, "exactly one of -p, -t, or -c is required\n");
+		return -EINVAL;
+	}
 	return 0;
 }
 
@@ -252,14 +449,17 @@ int pmi_record_main(int argc, char **argv)
 	struct sigaction sa = { 0 };
 	struct pmi_bpf_config cfg;
 	char bpf_obj_path[PATH_MAX];
+	const char *raw_event_ptrs[PMI_MAX_EVENTS - 1];
+	size_t i;
 	int err;
 
 	memset(&rt, 0, sizeof(rt));
+	g_stop = 0;
 	err = parse_record_options(argc, argv, &rt.opts);
 	if (err) {
 		if (err == 2)
 			return 0;
-		fprintf(stderr, "invalid record arguments\n");
+		record_usage(stderr);
 		return 1;
 	}
 
@@ -276,15 +476,21 @@ int pmi_record_main(int argc, char **argv)
 		rt.target_pid = rt.opts.tid;
 	}
 
-	err = pmi_event_list_resolve(&rt.events, rt.opts.event_inputs,
-				     rt.opts.event_input_count,
-				     "/sys/bus/event_source/devices");
-	if (err) {
-		fprintf(stderr, "event resolution failed: %s\n", strerror(-err));
-		return 1;
+	memset(&rt.events, 0, sizeof(rt.events));
+	if (rt.opts.raw_event_count > 0) {
+		for (i = 0; i < rt.opts.raw_event_count; ++i)
+			raw_event_ptrs[i] = rt.opts.raw_event_tokens[i];
+		err = pmi_event_list_resolve_raw_tokens(&rt.events, raw_event_ptrs,
+							rt.opts.raw_event_count,
+							"/sys/bus/event_source/devices");
+		if (err) {
+			fprintf(stderr, "event resolution failed: %s\n",
+				rt.events.error[0] ? rt.events.error : strerror(-err));
+			return 1;
+		}
 	}
 
-	err = pmi_output_open(&rt.writer, rt.opts.output_path);
+	err = pmi_output_open(&rt.writer, rt.opts.output_path, rt.opts.period);
 	if (err) {
 		fprintf(stderr, "open output failed: %s\n", strerror(-err));
 		return 1;
@@ -324,9 +530,8 @@ int pmi_record_main(int argc, char **argv)
 		return 1;
 	}
 
-	if (rt.child_pid > 0) {
+	if (rt.child_pid > 0)
 		kill(rt.child_pid, SIGCONT);
-	}
 
 	sa.sa_handler = on_signal;
 	sigaction(SIGINT, &sa, NULL);
@@ -335,7 +540,6 @@ int pmi_record_main(int argc, char **argv)
 	while (!g_stop) {
 		struct pollfd fds[PMI_MAX_TRACKED_TIDS + 1];
 		nfds_t nfds = 0;
-		size_t i;
 		int status;
 		int ring_fd = ring_buffer__epoll_fd(rt.bpf.ringbuf);
 
@@ -359,10 +563,10 @@ int pmi_record_main(int argc, char **argv)
 			attach_target_threads(&rt, rt.target_pid);
 
 		if (rt.child_pid > 0) {
-			pid_t waited = waitpid(rt.child_pid, &status, WNOHANG);
+			pid_t rc = waitpid(rt.child_pid, &status, WNOHANG);
 
-			if (waited == rt.child_pid)
-				break;
+			if (rc == rt.child_pid)
+				g_stop = 1;
 		}
 	}
 

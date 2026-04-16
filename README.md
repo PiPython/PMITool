@@ -6,7 +6,7 @@ Linux/arm64 PMI sampler implemented in C with `perf_event_open` and eBPF.
 
 - Linux-only collector
 - Instruction-period sampling (`1,000,000` retired instructions by default)
-- Custom sibling PMU events from CPU core PMU sysfs descriptions
+- Raw sibling PMU events from the CPU core PMU (`-e r0010,r0011`)
 - `perf_event` BPF program for stack/IP enrichment
 - Raw sample recording plus function-level report generation
 
@@ -72,19 +72,33 @@ make USE_SYSTEM_LIBBPF=1 test
 Record:
 
 ```bash
-./build/pmi record --pid 1234 --event cycles --event armv8_pmuv3_0/event=0x08/ --out samples.pmi
+sudo ./build/pmi record -p 1234 -o samples.pmi
 ```
 
 Launch and record:
 
 ```bash
-./build/pmi record --cmd 'taskset -c 0 ./bench' --stack full --out samples.pmi
+sudo ./build/pmi record -c 'taskset -c 0 ./bench' -s full -o samples.pmi
+```
+
+Launch and record with raw PMU events plus a shorter sampling period:
+
+```bash
+sudo ./build/pmi record -c './bench' -n 100000 -e r0010,r0011 -o samples.pmi
 ```
 
 Report:
 
 ```bash
-./build/pmi report --input samples.pmi --limit 20
+./build/pmi report -i samples.pmi -l 20
+```
+
+Help:
+
+```bash
+./build/pmi -h
+./build/pmi record -h
+./build/pmi report -h
 ```
 
 ## Raw sample format
@@ -92,22 +106,29 @@ Report:
 `record` writes tab-separated text records:
 
 ```text
-S <time_ns> <pid> <tid> <cpu> <stream_id> <lost_flags> <ip> <user_stack_id> <kernel_stack_id> <comm> <module> <symbol> <event_blob> <folded_stack>
+S <seq> <insn_total> <insn_expected> <pid> <tid> <ip> <symbol> <events> <stack>
 ```
 
-`event_blob` is a comma-separated list:
+- `seq`: sample sequence number starting from 1
+- `insn_total`: exact cumulative instructions counter from the leader event
+- `insn_expected`: `seq * period_insn`
+- `events`: comma-separated custom raw PMU values such as `r0010=123,r0011=456`
+- `stack`: `-` in `top` mode, or raw user-stack IPs such as `0xaaa;0xbbb;0xccc`
+
+The file starts with:
 
 ```text
-name@id=value/enabled/running
+# pmi raw v2
 ```
 
-This keeps the output easy to inspect while staying stable enough for the
-bundled `report` command.
+`report` reads only this v2 format.
 
 ## Current limits
 
-- Only CPU core PMU alias/raw events are supported
+- Only Linux/arm64 is supported
+- Only CPU core PMU raw events are supported
+- `-e` requires a real CPU PMU; virtual environments without one will fail fast
 - `record --pid` snapshots and refreshes thread lists periodically, but does not
   attempt to preserve symbol/mmap history after process exit
-- Full-stack folded output is best-effort and depends on `/proc/<pid>/maps`
-  being readable while recording
+- `--stack full` records raw stack addresses during capture and leaves full-stack
+  symbolization to offline consumers such as `report`

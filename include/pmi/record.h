@@ -18,8 +18,8 @@ struct pmi_record_options {
 	bool capture_kernel_stack;
 	int mmap_pages;
 	int poll_timeout_ms;
-	char *event_inputs[PMI_MAX_EVENTS - 1];
-	size_t event_input_count;
+	char raw_event_tokens[PMI_MAX_EVENTS - 1][PMI_MAX_EVENT_NAME];
+	size_t raw_event_count;
 };
 
 struct pmi_report_options {

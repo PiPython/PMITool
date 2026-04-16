@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -9,8 +10,13 @@ static void sanitize_field(const char *src, char *dst, size_t cap)
 {
 	size_t i, j = 0;
 
-	if (!src || !dst || cap == 0)
+	if (!dst || cap == 0)
 		return;
+
+	if (!src) {
+		dst[0] = '\0';
+		return;
+	}
 
 	for (i = 0; src[i] != '\0' && j + 1 < cap; ++i) {
 		char c = src[i];
@@ -22,70 +28,90 @@ static void sanitize_field(const char *src, char *dst, size_t cap)
 	dst[j] = '\0';
 }
 
-int pmi_output_open(struct pmi_output_writer *writer, const char *path)
+static int write_custom_events(FILE *fp, const struct pmi_joined_sample *sample)
 {
-	if (!writer || !path)
+	size_t i;
+	bool wrote = false;
+
+	for (i = 1; i < sample->perf.event_count; ++i) {
+		const char *name = sample->perf.event_names[i][0] ?
+					   sample->perf.event_names[i] :
+					   "event";
+
+		if (wrote && fputc(',', fp) == EOF)
+			return -EIO;
+		if (fprintf(fp, "%s=%" PRIu64, name,
+			    (uint64_t)sample->perf.events[i].value) < 0)
+			return -EIO;
+		wrote = true;
+	}
+
+	if (!wrote && fputc('-', fp) == EOF)
+		return -EIO;
+
+	return 0;
+}
+
+int pmi_output_open(struct pmi_output_writer *writer, const char *path,
+		    uint64_t period_insn)
+{
+	if (!writer || !path || period_insn == 0)
 		return -EINVAL;
 
+	memset(writer, 0, sizeof(*writer));
 	writer->fp = fopen(path, "w");
 	if (!writer->fp)
 		return -errno;
 
-	fprintf(writer->fp, "# pmi raw v1\n");
+	writer->period_insn = period_insn;
+	fprintf(writer->fp, "# pmi raw v2\n");
 	return 0;
 }
 
 int pmi_output_write_sample(struct pmi_output_writer *writer,
 			    const struct pmi_joined_sample *sample,
-			    const char *module, const char *symbol,
-			    const char *folded_stack)
+			    const char *symbol, const char *stack)
 {
-	char comm[PMI_COMM_LEN];
-	char safe_module[PMI_MAX_MODULE_LEN];
 	char safe_symbol[PMI_MAX_SYMBOL_LEN];
-	char safe_stack[PMI_MAX_FOLDED_LEN];
-	size_t i;
+	char safe_stack[PMI_MAX_STACK_TEXT_LEN];
+	uint64_t seq;
+	uint64_t insn_total = 0;
+	uint64_t insn_expected;
+	uint64_t ip;
+	pid_t pid;
+	pid_t tid;
+	int err;
 
 	if (!writer || !writer->fp || !sample)
 		return -EINVAL;
 
-	sanitize_field(sample->bpf.comm[0] ? sample->bpf.comm : sample->perf.comm,
-		       comm, sizeof(comm));
-	sanitize_field(module ? module : "-", safe_module, sizeof(safe_module));
-	sanitize_field(symbol ? symbol : "-", safe_symbol, sizeof(safe_symbol));
-	sanitize_field(folded_stack ? folded_stack : "-", safe_stack,
+	ip = sample->bpf.ip ? sample->bpf.ip : sample->perf.ip;
+	pid = sample->perf.pid ? sample->perf.pid : (pid_t)sample->bpf.pid;
+	tid = sample->perf.tid ? sample->perf.tid : (pid_t)sample->bpf.tid;
+	if (sample->perf.event_count > 0)
+		insn_total = sample->perf.events[0].value;
+
+	sanitize_field(symbol && symbol[0] ? symbol : "-", safe_symbol,
+		       sizeof(safe_symbol));
+	sanitize_field(stack && stack[0] ? stack : "-", safe_stack,
 		       sizeof(safe_stack));
 
-		fprintf(writer->fp,
-			"S\t%" PRIu64 "\t%d\t%d\t%u\t%" PRIu64 "\t%u\t0x%" PRIx64
-			"\t%d\t%d\t%s\t%s\t%s\t",
-			(uint64_t)(sample->perf.time_ns ? sample->perf.time_ns :
-				   sample->bpf.time_ns),
-			sample->perf.pid ? sample->perf.pid : (pid_t)sample->bpf.pid,
-			sample->perf.tid ? sample->perf.tid : (pid_t)sample->bpf.tid,
-			(sample->perf.stream_id || sample->perf.pid) ? sample->perf.cpu :
-								       sample->bpf.cpu,
-			(uint64_t)(sample->perf.stream_id ? sample->perf.stream_id :
-				   sample->bpf.attach_cookie),
-			sample->lost_flags,
-			(uint64_t)(sample->bpf.ip ? sample->bpf.ip : sample->perf.ip),
-			sample->bpf.user_stack_id, sample->bpf.kernel_stack_id, comm,
-			safe_module, safe_symbol);
+	seq = ++writer->seq;
+	insn_expected = seq * writer->period_insn;
 
-		for (i = 0; i < sample->perf.event_count; ++i) {
-			const struct pmi_event_value *v = &sample->perf.events[i];
+	if (fprintf(writer->fp,
+		    "S\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\t%d\t%d\t0x%" PRIx64
+		    "\t%s\t",
+		    seq, insn_total, insn_expected, pid, tid, ip, safe_symbol) < 0)
+		return -EIO;
 
-			if (i != 0) {
-				fputc(',', writer->fp);
-			}
-			fprintf(writer->fp, "%s@%" PRIu64 "=%" PRIu64 "/%" PRIu64 "/%" PRIu64,
-				sample->perf.event_names[i][0] ? sample->perf.event_names[i] :
-								 "event",
-				(uint64_t)v->id, (uint64_t)v->value,
-				(uint64_t)v->time_enabled, (uint64_t)v->time_running);
-		}
+	err = write_custom_events(writer->fp, sample);
+	if (err)
+		return err;
 
-	fprintf(writer->fp, "\t%s\n", safe_stack);
+	if (fprintf(writer->fp, "\t%s\n", safe_stack) < 0)
+		return -EIO;
+
 	return ferror(writer->fp) ? -EIO : 0;
 }
 
