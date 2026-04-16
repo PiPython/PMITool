@@ -6,6 +6,15 @@
 
 #include "pmi/output.h"
 
+#define PMI_COL_TYPE_WIDTH 4
+#define PMI_COL_SEQ_WIDTH 10
+#define PMI_COL_INSN_WIDTH 16
+#define PMI_COL_PID_WIDTH 8
+#define PMI_COL_TID_WIDTH 8
+#define PMI_COL_IP_WIDTH 18
+#define PMI_COL_SYMBOL_WIDTH 32
+#define PMI_COL_EVENTS_WIDTH 24
+
 static void sanitize_field(const char *src, char *dst, size_t cap)
 {
 	size_t i, j = 0;
@@ -28,28 +37,39 @@ static void sanitize_field(const char *src, char *dst, size_t cap)
 	dst[j] = '\0';
 }
 
-static int write_custom_events(FILE *fp, const struct pmi_joined_sample *sample)
+static int format_custom_events(const struct pmi_joined_sample *sample, char *buf,
+				size_t cap)
 {
 	size_t i;
+	size_t len = 0;
 	bool wrote = false;
+
+	if (!buf || cap == 0)
+		return -EINVAL;
 
 	for (i = 0; i < sample->perf.event_count; ++i) {
 		const char *name = sample->perf.event_names[i][0] ?
 					   sample->perf.event_names[i] :
 					   "event";
+		int written;
 
 		if (strcmp(name, "instructions") == 0)
 			continue;
-		if (wrote && fputc(',', fp) == EOF)
-			return -EIO;
-		if (fprintf(fp, "%s=%" PRIu64, name,
-			    (uint64_t)sample->perf.events[i].value) < 0)
-			return -EIO;
+		written = snprintf(buf + len, cap - len, "%s%s=%" PRIu64,
+				   wrote ? "," : "", name,
+				   (uint64_t)sample->perf.events[i].value);
+		if (written < 0 || (size_t)written >= cap - len)
+			return -E2BIG;
+		len += (size_t)written;
 		wrote = true;
 	}
 
-	if (!wrote && fputc('-', fp) == EOF)
-		return -EIO;
+	if (!wrote) {
+		if (cap < 2)
+			return -E2BIG;
+		buf[0] = '-';
+		buf[1] = '\0';
+	}
 
 	return 0;
 }
@@ -82,7 +102,12 @@ int pmi_output_open(struct pmi_output_writer *writer, const char *path,
 	writer->period_insn = period_insn;
 	fprintf(writer->fp, "# pmi raw v2\n");
 	fprintf(writer->fp,
-		"type\tseq\tinsn_total\tinsn_expected\tpid\ttid\tip\tsymbol\tevents\tstack\n");
+		"%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t%s\n",
+		PMI_COL_TYPE_WIDTH, "type", PMI_COL_SEQ_WIDTH, "seq",
+		PMI_COL_INSN_WIDTH, "insn_total", PMI_COL_INSN_WIDTH,
+		"insn_expected", PMI_COL_PID_WIDTH, "pid", PMI_COL_TID_WIDTH,
+		"tid", PMI_COL_IP_WIDTH, "ip", PMI_COL_SYMBOL_WIDTH, "symbol",
+		PMI_COL_EVENTS_WIDTH, "events", "stack");
 	return 0;
 }
 
@@ -92,6 +117,8 @@ int pmi_output_write_sample(struct pmi_output_writer *writer,
 {
 	char safe_symbol[PMI_MAX_SYMBOL_LEN];
 	char safe_stack[PMI_MAX_STACK_TEXT_LEN];
+	char events[PMI_MAX_FOLDED_LEN];
+	char ip_text[32];
 	uint64_t seq;
 	uint64_t insn_total = 0;
 	uint64_t insn_expected;
@@ -112,21 +139,21 @@ int pmi_output_write_sample(struct pmi_output_writer *writer,
 		       sizeof(safe_symbol));
 	sanitize_field(stack && stack[0] ? stack : "-", safe_stack,
 		       sizeof(safe_stack));
+	err = format_custom_events(sample, events, sizeof(events));
+	if (err)
+		return err;
+	snprintf(ip_text, sizeof(ip_text), "0x%" PRIx64, ip);
 
 	seq = ++writer->seq;
 	insn_expected = seq * writer->period_insn;
 
 	if (fprintf(writer->fp,
-		    "S\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\t%d\t%d\t0x%" PRIx64
-		    "\t%s\t",
-		    seq, insn_total, insn_expected, pid, tid, ip, safe_symbol) < 0)
-		return -EIO;
-
-	err = write_custom_events(writer->fp, sample);
-	if (err)
-		return err;
-
-	if (fprintf(writer->fp, "\t%s\n", safe_stack) < 0)
+		    "%-*s\t%-*" PRIu64 "\t%-*" PRIu64 "\t%-*" PRIu64 "\t%-*d\t%-*d\t%-*s\t%-*s\t%-*s\t%s\n",
+		    PMI_COL_TYPE_WIDTH, "S", PMI_COL_SEQ_WIDTH, seq,
+		    PMI_COL_INSN_WIDTH, insn_total, PMI_COL_INSN_WIDTH,
+		    insn_expected, PMI_COL_PID_WIDTH, pid, PMI_COL_TID_WIDTH, tid,
+		    PMI_COL_IP_WIDTH, ip_text, PMI_COL_SYMBOL_WIDTH, safe_symbol,
+		    PMI_COL_EVENTS_WIDTH, events, safe_stack) < 0)
 		return -EIO;
 
 	return ferror(writer->fp) ? -EIO : 0;

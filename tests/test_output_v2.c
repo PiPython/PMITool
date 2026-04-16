@@ -14,6 +14,23 @@
 		}                                                               \
 	} while (0)
 
+static char *next_field(char **cursor)
+{
+	char *field = strsep(cursor, "\t");
+	char *end;
+
+	if (!field)
+		return NULL;
+	while (*field == ' ')
+		field++;
+	end = field + strlen(field);
+	while (end > field && (end[-1] == ' ' || end[-1] == '\n')) {
+		end[-1] = '\0';
+		end--;
+	}
+	return field;
+}
+
 int main(void)
 {
 	char path[] = "/tmp/pmi-output-v2-XXXXXX";
@@ -23,6 +40,7 @@ int main(void)
 	char header[64];
 	char columns[256];
 	char line[512];
+	char *cursor;
 	int fd;
 	int err;
 
@@ -56,13 +74,29 @@ int main(void)
 	CHECK(fgets(header, sizeof(header), fp) != NULL);
 	CHECK(strcmp(header, "# pmi raw v2\n") == 0);
 	CHECK(fgets(columns, sizeof(columns), fp) != NULL);
-	CHECK(strcmp(columns,
-		     "type\tseq\tinsn_total\tinsn_expected\tpid\ttid\tip\tsymbol\tevents\tstack\n") ==
-	      0);
+	cursor = columns;
+	CHECK(strcmp(next_field(&cursor), "type") == 0);
+	CHECK(strcmp(next_field(&cursor), "seq") == 0);
+	CHECK(strcmp(next_field(&cursor), "insn_total") == 0);
+	CHECK(strcmp(next_field(&cursor), "insn_expected") == 0);
+	CHECK(strcmp(next_field(&cursor), "pid") == 0);
+	CHECK(strcmp(next_field(&cursor), "tid") == 0);
+	CHECK(strcmp(next_field(&cursor), "ip") == 0);
+	CHECK(strcmp(next_field(&cursor), "symbol") == 0);
+	CHECK(strcmp(next_field(&cursor), "events") == 0);
+	CHECK(strcmp(next_field(&cursor), "stack") == 0);
 	CHECK(fgets(line, sizeof(line), fp) != NULL);
-	CHECK(strcmp(line,
-		     "S\t1\t1000000\t1000000\t11\t22\t0x1234\thot_func\tr0010=7,r0011=9\t0x1234;0x2345\n") ==
-	      0);
+	cursor = line;
+	CHECK(strcmp(next_field(&cursor), "S") == 0);
+	CHECK(strcmp(next_field(&cursor), "1") == 0);
+	CHECK(strcmp(next_field(&cursor), "1000000") == 0);
+	CHECK(strcmp(next_field(&cursor), "1000000") == 0);
+	CHECK(strcmp(next_field(&cursor), "11") == 0);
+	CHECK(strcmp(next_field(&cursor), "22") == 0);
+	CHECK(strcmp(next_field(&cursor), "0x1234") == 0);
+	CHECK(strcmp(next_field(&cursor), "hot_func") == 0);
+	CHECK(strcmp(next_field(&cursor), "r0010=7,r0011=9") == 0);
+	CHECK(strcmp(next_field(&cursor), "0x1234;0x2345") == 0);
 	fclose(fp);
 	unlink(path);
 	return 0;
