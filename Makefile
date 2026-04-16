@@ -19,6 +19,16 @@ CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=c11
 LDFLAGS += -lelf -lz
 
 ifeq ($(USE_SYSTEM_LIBBPF),1)
+ifneq ($(filter clean fetch-libbpf,$(MAKECMDGOALS)),)
+else
+ifeq ($(shell pkg-config --exists libbpf && echo yes),yes)
+else
+$(error system libbpf not found via pkg-config; install libbpf-devel and pkgconf-pkg-config, or build with vendored libbpf)
+endif
+endif
+endif
+
+ifeq ($(USE_SYSTEM_LIBBPF),1)
 CPPFLAGS += -Iinclude $(LIBBPF_PKG_CFLAGS) -D_GNU_SOURCE
 BPF_CFLAGS := -O2 -g -target bpf -D__TARGET_ARCH_arm64 \
 	-Iinclude $(LIBBPF_PKG_CFLAGS)

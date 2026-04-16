@@ -45,6 +45,13 @@ sudo dnf install -y clang llvm make pkgconf-pkg-config libbpf-devel elfutils-lib
 make USE_SYSTEM_LIBBPF=1
 ```
 
+openEuler:
+
+```bash
+sudo dnf install -y clang llvm make pkgconf-pkg-config libbpf-devel elfutils-libelf-devel zlib-devel kernel-headers
+make USE_SYSTEM_LIBBPF=1
+```
+
 Arch Linux:
 
 ```bash
