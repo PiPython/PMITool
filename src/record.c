@@ -6,6 +6,7 @@
 #include <getopt.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <libgen.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -420,6 +421,38 @@ static int parse_record_options(int argc, char **argv, struct pmi_record_options
 	return 0;
 }
 
+static int resolve_bpf_object_path(char *path, size_t cap)
+{
+	char exe_path[PATH_MAX];
+	char dirbuf[PATH_MAX];
+	ssize_t len;
+
+	if (!path || cap == 0)
+		return -EINVAL;
+
+	len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+	if (len < 0)
+		return -errno;
+	exe_path[len] = '\0';
+
+	if (pmi_copy_cstr(dirbuf, sizeof(dirbuf), exe_path) != 0)
+		return -E2BIG;
+
+	if (snprintf(path, cap, "%s/bpf/pmi.bpf.o", dirname(dirbuf)) >= (int)cap)
+		return -E2BIG;
+
+	if (access(path, R_OK) == 0)
+		return 0;
+
+	if (snprintf(path, cap, "build/bpf/pmi.bpf.o") >= (int)cap)
+		return -E2BIG;
+
+	if (access(path, R_OK) == 0)
+		return 0;
+
+	return -ENOENT;
+}
+
 static void close_runtime(struct record_runtime *rt)
 {
 	size_t i;
@@ -510,7 +543,13 @@ int pmi_record_main(int argc, char **argv)
 
 	cfg.stack_mode = rt.opts.stack_mode;
 	cfg.capture_kernel_stack = rt.opts.capture_kernel_stack ? 1 : 0;
-	snprintf(bpf_obj_path, sizeof(bpf_obj_path), "build/bpf/pmi.bpf.o");
+	err = resolve_bpf_object_path(bpf_obj_path, sizeof(bpf_obj_path));
+	if (err) {
+		fprintf(stderr,
+			"cannot find pmi.bpf.o; expected next to the executable or in ./build/bpf/\n");
+		close_runtime(&rt);
+		return 1;
+	}
 	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 	err = pmi_bpf_runtime_open(&rt.bpf, bpf_obj_path, &cfg, on_bpf_event,
 				   rt.joiner);
