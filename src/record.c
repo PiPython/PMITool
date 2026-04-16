@@ -136,7 +136,7 @@ static int on_joined_sample(const struct pmi_joined_sample *sample, void *ctx)
 	uint64_t ip;
 	pid_t pid;
 
-	if (!sample || sample->perf.event_count == 0)
+	if (!sample)
 		return 0;
 
 	ip = sample->bpf.ip ? sample->bpf.ip : sample->perf.ip;
