@@ -33,11 +33,13 @@ static int write_custom_events(FILE *fp, const struct pmi_joined_sample *sample)
 	size_t i;
 	bool wrote = false;
 
-	for (i = 1; i < sample->perf.event_count; ++i) {
+	for (i = 0; i < sample->perf.event_count; ++i) {
 		const char *name = sample->perf.event_names[i][0] ?
 					   sample->perf.event_names[i] :
 					   "event";
 
+		if (strcmp(name, "instructions") == 0)
+			continue;
 		if (wrote && fputc(',', fp) == EOF)
 			return -EIO;
 		if (fprintf(fp, "%s=%" PRIu64, name,
@@ -49,6 +51,20 @@ static int write_custom_events(FILE *fp, const struct pmi_joined_sample *sample)
 	if (!wrote && fputc('-', fp) == EOF)
 		return -EIO;
 
+	return 0;
+}
+
+static uint64_t find_instruction_total(const struct pmi_joined_sample *sample)
+{
+	size_t i;
+
+	for (i = 0; i < sample->perf.event_count; ++i) {
+		if (strcmp(sample->perf.event_names[i], "instructions") == 0)
+			return sample->perf.events[i].value;
+	}
+
+	if (sample->perf.event_count > 0)
+		return sample->perf.events[0].value;
 	return 0;
 }
 
@@ -65,6 +81,8 @@ int pmi_output_open(struct pmi_output_writer *writer, const char *path,
 
 	writer->period_insn = period_insn;
 	fprintf(writer->fp, "# pmi raw v2\n");
+	fprintf(writer->fp,
+		"type\tseq\tinsn_total\tinsn_expected\tpid\ttid\tip\tsymbol\tevents\tstack\n");
 	return 0;
 }
 
@@ -88,8 +106,7 @@ int pmi_output_write_sample(struct pmi_output_writer *writer,
 	ip = sample->bpf.ip ? sample->bpf.ip : sample->perf.ip;
 	pid = sample->perf.pid ? sample->perf.pid : (pid_t)sample->bpf.pid;
 	tid = sample->perf.tid ? sample->perf.tid : (pid_t)sample->bpf.tid;
-	if (sample->perf.event_count > 0)
-		insn_total = sample->perf.events[0].value;
+	insn_total = find_instruction_total(sample);
 
 	sanitize_field(symbol && symbol[0] ? symbol : "-", safe_symbol,
 		       sizeof(safe_symbol));

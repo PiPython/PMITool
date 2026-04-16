@@ -270,7 +270,11 @@ int pmi_report_main(int argc, char **argv)
 			field[strcspn(field, "\r\n")] = '\0';
 			fields[field_count++] = field;
 		}
-		if (field_count != 10 || strcmp(fields[0], "S") != 0)
+		if (field_count != 10)
+			continue;
+		if (strcmp(fields[0], "type") == 0)
+			continue;
+		if (strcmp(fields[0], "S") != 0)
 			continue;
 
 		pid = (pid_t)strtol(fields[4], NULL, 10);

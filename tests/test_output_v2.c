@@ -21,6 +21,7 @@ int main(void)
 	struct pmi_joined_sample sample;
 	FILE *fp;
 	char header[64];
+	char columns[256];
 	char line[512];
 	int fd;
 	int err;
@@ -54,6 +55,10 @@ int main(void)
 	CHECK(fp != NULL);
 	CHECK(fgets(header, sizeof(header), fp) != NULL);
 	CHECK(strcmp(header, "# pmi raw v2\n") == 0);
+	CHECK(fgets(columns, sizeof(columns), fp) != NULL);
+	CHECK(strcmp(columns,
+		     "type\tseq\tinsn_total\tinsn_expected\tpid\ttid\tip\tsymbol\tevents\tstack\n") ==
+	      0);
 	CHECK(fgets(line, sizeof(line), fp) != NULL);
 	CHECK(strcmp(line,
 		     "S\t1\t1000000\t1000000\t11\t22\t0x1234\thot_func\tr0010=7,r0011=9\t0x1234;0x2345\n") ==
