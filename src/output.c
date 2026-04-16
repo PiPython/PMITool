@@ -56,31 +56,34 @@ int pmi_output_write_sample(struct pmi_output_writer *writer,
 	sanitize_field(folded_stack ? folded_stack : "-", safe_stack,
 		       sizeof(safe_stack));
 
-	fprintf(writer->fp,
-		"S\t%" PRIu64 "\t%d\t%d\t%u\t%" PRIu64 "\t%u\t0x%" PRIx64
-		"\t%d\t%d\t%s\t%s\t%s\t",
-		sample->perf.time_ns ? sample->perf.time_ns : sample->bpf.time_ns,
-		sample->perf.pid ? sample->perf.pid : (pid_t)sample->bpf.pid,
-		sample->perf.tid ? sample->perf.tid : (pid_t)sample->bpf.tid,
-		(sample->perf.stream_id || sample->perf.pid) ? sample->perf.cpu :
-							       sample->bpf.cpu,
-		sample->perf.stream_id ? sample->perf.stream_id :
-					       sample->bpf.attach_cookie,
-		sample->lost_flags,
-		sample->bpf.ip ? sample->bpf.ip : sample->perf.ip,
-		sample->bpf.user_stack_id, sample->bpf.kernel_stack_id, comm,
-		safe_module, safe_symbol);
+		fprintf(writer->fp,
+			"S\t%" PRIu64 "\t%d\t%d\t%u\t%" PRIu64 "\t%u\t0x%" PRIx64
+			"\t%d\t%d\t%s\t%s\t%s\t",
+			(uint64_t)(sample->perf.time_ns ? sample->perf.time_ns :
+				   sample->bpf.time_ns),
+			sample->perf.pid ? sample->perf.pid : (pid_t)sample->bpf.pid,
+			sample->perf.tid ? sample->perf.tid : (pid_t)sample->bpf.tid,
+			(sample->perf.stream_id || sample->perf.pid) ? sample->perf.cpu :
+								       sample->bpf.cpu,
+			(uint64_t)(sample->perf.stream_id ? sample->perf.stream_id :
+				   sample->bpf.attach_cookie),
+			sample->lost_flags,
+			(uint64_t)(sample->bpf.ip ? sample->bpf.ip : sample->perf.ip),
+			sample->bpf.user_stack_id, sample->bpf.kernel_stack_id, comm,
+			safe_module, safe_symbol);
 
-	for (i = 0; i < sample->perf.event_count; ++i) {
-		const struct pmi_event_value *v = &sample->perf.events[i];
+		for (i = 0; i < sample->perf.event_count; ++i) {
+			const struct pmi_event_value *v = &sample->perf.events[i];
 
-		if (i != 0)
-			fputc(',', writer->fp);
-		fprintf(writer->fp, "%s@%" PRIu64 "=%" PRIu64 "/%" PRIu64 "/%" PRIu64,
-			sample->perf.event_names[i][0] ? sample->perf.event_names[i] :
-							 "event",
-			v->id, v->value, v->time_enabled, v->time_running);
-	}
+			if (i != 0) {
+				fputc(',', writer->fp);
+			}
+			fprintf(writer->fp, "%s@%" PRIu64 "=%" PRIu64 "/%" PRIu64 "/%" PRIu64,
+				sample->perf.event_names[i][0] ? sample->perf.event_names[i] :
+								 "event",
+				(uint64_t)v->id, (uint64_t)v->value,
+				(uint64_t)v->time_enabled, (uint64_t)v->time_running);
+		}
 
 	fprintf(writer->fp, "\t%s\n", safe_stack);
 	return ferror(writer->fp) ? -EIO : 0;

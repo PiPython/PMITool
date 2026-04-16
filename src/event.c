@@ -29,8 +29,10 @@ static int read_first_line(const char *path, char *buf, size_t cap)
 	if (!fp)
 		return -errno;
 	if (!fgets(buf, cap, fp)) {
+		int failed = ferror(fp);
+
 		fclose(fp);
-		return ferror(fp) ? -errno : -ENOENT;
+		return failed ? -errno : -ENOENT;
 	}
 	fclose(fp);
 	buf[strcspn(buf, "\r\n")] = '\0';

@@ -29,6 +29,7 @@ struct pmi_module_cache {
 	char path[PATH_MAX];
 	struct pmi_symbol *symbols;
 	size_t count;
+	uint16_t elf_type;
 };
 
 struct pmi_symbolizer {
@@ -50,6 +51,7 @@ static int parse_symbols(struct pmi_module_cache *cache, const void *image, size
 		return -ENOTSUP;
 	if (len < ehdr->e_shoff + (size_t)ehdr->e_shentsize * ehdr->e_shnum)
 		return -EINVAL;
+	cache->elf_type = ehdr->e_type;
 
 	shdrs = (const Elf64_Shdr *)(base + ehdr->e_shoff);
 	for (i = 0; i < ehdr->e_shnum; ++i) {
@@ -79,18 +81,20 @@ static int parse_symbols(struct pmi_module_cache *cache, const void *image, size
 		syms = (const Elf64_Sym *)(base + symtab->sh_offset);
 		nsyms = symtab->sh_size / sizeof(Elf64_Sym);
 
-		for (j = 0; j < nsyms; ++j) {
-			const char *name;
+			for (j = 0; j < nsyms; ++j) {
+				const char *name;
 
-			if (syms[j].st_name == 0 || syms[j].st_shndx == SHN_UNDEF)
-				continue;
-			if (ELF64_ST_TYPE(syms[j].st_info) != STT_FUNC &&
-			    ELF64_ST_TYPE(syms[j].st_info) != STT_NOTYPE)
-				continue;
-			name = base + strtab->sh_offset + syms[j].st_name;
-			cache->symbols[cache->count].value = syms[j].st_value;
-			cache->symbols[cache->count].size = syms[j].st_size;
-			cache->symbols[cache->count].name = strdup(name);
+				if (syms[j].st_name == 0 || syms[j].st_shndx == SHN_UNDEF)
+					continue;
+				if (ELF64_ST_TYPE(syms[j].st_info) != STT_FUNC &&
+				    ELF64_ST_TYPE(syms[j].st_info) != STT_GNU_IFUNC)
+					continue;
+				name = base + strtab->sh_offset + syms[j].st_name;
+				if (name[0] == '\0' || name[0] == '$')
+					continue;
+				cache->symbols[cache->count].value = syms[j].st_value;
+				cache->symbols[cache->count].size = syms[j].st_size;
+				cache->symbols[cache->count].name = strdup(name);
 			if (!cache->symbols[cache->count].name)
 				return -ENOMEM;
 			cache->count++;
@@ -263,6 +267,7 @@ int pmi_symbolizer_symbolize_ip(struct pmi_symbolizer *symbolizer, pid_t pid,
 {
 	uint64_t relative_ip = ip;
 	struct pmi_module_cache *cache;
+	uint64_t lookup_ip;
 	int err;
 
 	if (!symbolizer || !module || !symbol)
@@ -281,7 +286,8 @@ int pmi_symbolizer_symbolize_ip(struct pmi_symbolizer *symbolizer, pid_t pid,
 	}
 
 	cache = load_module(symbolizer, module);
-	if (!cache || lookup_symbol(cache, relative_ip, symbol, symbol_cap) != 0)
+	lookup_ip = (cache && cache->elf_type == ET_EXEC) ? ip : relative_ip;
+	if (!cache || lookup_symbol(cache, lookup_ip, symbol, symbol_cap) != 0)
 		snprintf(symbol, symbol_cap, "0x%" PRIx64, ip);
 	return 0;
 }
