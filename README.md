@@ -22,22 +22,42 @@ also requires its documented prerequisites:
 - `libelf`
 - `zlib`
 
-Fetch vendored `libbpf`:
+Option 1: use vendored `libbpf`:
 
 ```bash
 ./scripts/fetch_libbpf.sh
+make
 ```
 
-Build:
+Option 2: use system `libbpf` instead of vendoring it.
+
+Debian/Ubuntu:
 
 ```bash
-make
+sudo apt-get install -y clang llvm make pkg-config libbpf-dev libelf-dev zlib1g-dev linux-libc-dev
+make USE_SYSTEM_LIBBPF=1
+```
+
+Fedora/RHEL:
+
+```bash
+sudo dnf install -y clang llvm make pkgconf-pkg-config libbpf-devel elfutils-libelf-devel zlib-devel kernel-headers
+make USE_SYSTEM_LIBBPF=1
+```
+
+Arch Linux:
+
+```bash
+sudo pacman -S --needed clang llvm make pkgconf libbpf elfutils zlib linux-headers
+make USE_SYSTEM_LIBBPF=1
 ```
 
 Run unit tests:
 
 ```bash
 make test
+# or, if using the system package:
+make USE_SYSTEM_LIBBPF=1 test
 ```
 
 ## Commands

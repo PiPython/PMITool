@@ -3,21 +3,34 @@ BUILD_DIR := build
 OBJ_DIR := $(BUILD_DIR)/obj
 BPF_BUILD_DIR := $(BUILD_DIR)/bpf
 BIN := $(BUILD_DIR)/$(PROJECT)
+USE_SYSTEM_LIBBPF ?= 0
 
 LIBBPF_DIR := third_party/libbpf/src
 LIBBPF_A := $(LIBBPF_DIR)/libbpf.a
 LIBBPF_HEADERS := $(LIBBPF_DIR)/root/usr/include
+LIBBPF_PKG_CFLAGS ?= $(shell pkg-config --cflags libbpf 2>/dev/null)
+LIBBPF_PKG_LIBS ?= $(shell pkg-config --libs libbpf 2>/dev/null)
 
 CC ?= clang
 CLANG ?= clang
 STRIP ?= llvm-strip
 
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=c11
-CPPFLAGS += -Iinclude -I$(LIBBPF_HEADERS) -D_GNU_SOURCE
 LDFLAGS += -lelf -lz
 
+ifeq ($(USE_SYSTEM_LIBBPF),1)
+CPPFLAGS += -Iinclude $(LIBBPF_PKG_CFLAGS) -D_GNU_SOURCE
+BPF_CFLAGS := -O2 -g -target bpf -D__TARGET_ARCH_arm64 \
+	-Iinclude $(LIBBPF_PKG_CFLAGS)
+LIBBPF_BUILD_DEPS :=
+LIBBPF_LINK_INPUT := $(LIBBPF_PKG_LIBS)
+else
+CPPFLAGS += -Iinclude -I$(LIBBPF_HEADERS) -D_GNU_SOURCE
 BPF_CFLAGS := -O2 -g -target bpf -D__TARGET_ARCH_arm64 \
 	-Iinclude -I$(LIBBPF_HEADERS) -Ithird_party/libbpf/include/uapi
+LIBBPF_BUILD_DEPS := $(LIBBPF_A)
+LIBBPF_LINK_INPUT := $(LIBBPF_A)
+endif
 
 SRC := \
 	src/main.c \
@@ -48,8 +61,8 @@ all: $(BIN)
 fetch-libbpf:
 	./scripts/fetch_libbpf.sh
 
-$(BIN): $(LIBBPF_A) $(OBJ) $(BPF_BUILD_DIR)/pmi.bpf.o | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(OBJ) $(LIBBPF_A) $(LDFLAGS) -o $@
+$(BIN): $(LIBBPF_BUILD_DEPS) $(OBJ) $(BPF_BUILD_DIR)/pmi.bpf.o | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(OBJ) $(LIBBPF_LINK_INPUT) $(LDFLAGS) -o $@
 
 $(OBJ_DIR)/%.o: src/%.c | $(OBJ_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -77,7 +90,7 @@ $(BPF_BUILD_DIR):
 	mkdir -p $@
 
 $(BUILD_DIR)/test_%: tests/test_%.c $(filter-out $(OBJ_DIR)/main.o,$(OBJ)) | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(filter-out $(OBJ_DIR)/main.o,$(OBJ)) $(LIBBPF_A) $(LDFLAGS) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(filter-out $(OBJ_DIR)/main.o,$(OBJ)) $(LIBBPF_LINK_INPUT) $(LDFLAGS) -o $@
 
 test: $(TEST_BIN)
 	@set -e; \
