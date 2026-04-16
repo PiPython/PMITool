@@ -39,6 +39,11 @@ int main(void)
 	cursor += sizeof(pid) + sizeof(tid);
 	memcpy(cursor, &time_ns, sizeof(time_ns));
 	cursor += sizeof(time_ns);
+	memcpy(cursor, &stream_id, sizeof(stream_id));
+	cursor += sizeof(stream_id);
+	memcpy(cursor, &cpu, sizeof(cpu));
+	memcpy(cursor + sizeof(cpu), &reserved, sizeof(reserved));
+	cursor += sizeof(cpu) + sizeof(reserved);
 	memcpy(cursor, &nr, sizeof(nr));
 	cursor += sizeof(nr);
 	memcpy(cursor, &enabled, sizeof(enabled));
@@ -50,11 +55,6 @@ int main(void)
 	memcpy(cursor, &value1, sizeof(value1));
 	memcpy(cursor + sizeof(value1), &id1, sizeof(id1));
 	cursor += sizeof(value1) + sizeof(id1);
-	memcpy(cursor, &cpu, sizeof(cpu));
-	memcpy(cursor + sizeof(cpu), &reserved, sizeof(reserved));
-	cursor += sizeof(cpu) + sizeof(reserved);
-	memcpy(cursor, &stream_id, sizeof(stream_id));
-	cursor += sizeof(stream_id);
 
 	err = pmi_perf_decode_sample(payload, (size_t)(cursor - payload), sample_type,
 				     &sample);

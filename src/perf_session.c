@@ -120,6 +120,37 @@ int pmi_perf_decode_sample(const void *data, size_t len, uint64_t sample_type,
 		cursor += sizeof(uint64_t);
 	}
 
+	if (sample_type & PERF_SAMPLE_ID) {
+		if ((size_t)(end - cursor) < sizeof(uint64_t))
+			return -EINVAL;
+		cursor += sizeof(uint64_t);
+	}
+
+	if (sample_type & PERF_SAMPLE_STREAM_ID) {
+		if ((size_t)(end - cursor) < sizeof(uint64_t))
+			return -EINVAL;
+		memcpy(&sample->stream_id, cursor, sizeof(uint64_t));
+		cursor += sizeof(uint64_t);
+	}
+
+	if (sample_type & PERF_SAMPLE_CPU) {
+		uint32_t cpu, reserved;
+
+		if ((size_t)(end - cursor) < sizeof(uint32_t) * 2)
+			return -EINVAL;
+		memcpy(&cpu, cursor, sizeof(cpu));
+		memcpy(&reserved, cursor + sizeof(cpu), sizeof(reserved));
+		(void)reserved;
+		sample->cpu = cpu;
+		cursor += sizeof(uint32_t) * 2;
+	}
+
+	if (sample_type & PERF_SAMPLE_PERIOD) {
+		if ((size_t)(end - cursor) < sizeof(uint64_t))
+			return -EINVAL;
+		cursor += sizeof(uint64_t);
+	}
+
 	if (sample_type & PERF_SAMPLE_READ) {
 		if ((size_t)(end - cursor) < sizeof(uint64_t))
 			return -EINVAL;
@@ -156,31 +187,6 @@ int pmi_perf_decode_sample(const void *data, size_t len, uint64_t sample_type,
 		cursor += sizeof(uint64_t) + nr_callchain * sizeof(uint64_t);
 		if (cursor > end)
 			return -EINVAL;
-	}
-
-	if (sample_type & PERF_SAMPLE_CPU) {
-		uint32_t cpu, reserved;
-
-		if ((size_t)(end - cursor) < sizeof(uint32_t) * 2)
-			return -EINVAL;
-		memcpy(&cpu, cursor, sizeof(cpu));
-		memcpy(&reserved, cursor + sizeof(cpu), sizeof(reserved));
-		(void)reserved;
-		sample->cpu = cpu;
-		cursor += sizeof(uint32_t) * 2;
-	}
-
-	if (sample_type & PERF_SAMPLE_PERIOD) {
-		if ((size_t)(end - cursor) < sizeof(uint64_t))
-			return -EINVAL;
-		cursor += sizeof(uint64_t);
-	}
-
-	if (sample_type & PERF_SAMPLE_STREAM_ID) {
-		if ((size_t)(end - cursor) < sizeof(uint64_t))
-			return -EINVAL;
-		memcpy(&sample->stream_id, cursor, sizeof(uint64_t));
-		cursor += sizeof(uint64_t);
 	}
 
 	return 0;
