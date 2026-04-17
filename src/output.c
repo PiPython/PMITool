@@ -6,14 +6,6 @@
 
 #include "pmi/output.h"
 
-#define PMI_COL_TYPE_WIDTH 4
-#define PMI_COL_SEQ_WIDTH 10
-#define PMI_COL_INSN_WIDTH 16
-#define PMI_COL_PID_WIDTH 8
-#define PMI_COL_TID_WIDTH 8
-#define PMI_COL_EVENTS_WIDTH 24
-#define PMI_COL_TOP_WIDTH 32
-
 static void sanitize_field(const char *src, char *dst, size_t cap)
 {
 	size_t i, j = 0;
@@ -88,59 +80,33 @@ static uint64_t compute_delta(struct pmi_output_writer *writer,
 	return delta;
 }
 
-static int format_custom_events(const struct pmi_perf_sample *sample,
-				const uint64_t *deltas, char *buf, size_t cap)
+int pmi_output_open(struct pmi_output_writer *writer, const char *path,
+		    const struct pmi_event_list *events)
 {
 	size_t i;
-	size_t len = 0;
-	bool wrote = false;
 
-	if (!buf || cap == 0)
+	if (!writer || !path)
 		return -EINVAL;
-
-	for (i = 1; i < sample->event_count; ++i) {
-		const char *name = sample->event_names[i][0] ?
-					   sample->event_names[i] :
-					   "event";
-		int written;
-
-		written = snprintf(buf + len, cap - len, "%s%s=%" PRIu64,
-				   wrote ? "," : "", name, deltas[i]);
-		if (written < 0 || (size_t)written >= cap - len)
-			return -E2BIG;
-		len += (size_t)written;
-		wrote = true;
-	}
-
-	if (!wrote) {
-		if (cap < 2)
-			return -E2BIG;
-		buf[0] = '-';
-		buf[1] = '\0';
-	}
-
-	return 0;
-}
-
-int pmi_output_open(struct pmi_output_writer *writer, const char *path,
-		    uint64_t period_insn)
-{
-	if (!writer || !path || period_insn == 0)
-		return -EINVAL;
+	if (events && events->count > PMI_MAX_EVENTS - 1)
+		return -E2BIG;
 
 	memset(writer, 0, sizeof(*writer));
 	writer->fp = fopen(path, "w");
 	if (!writer->fp)
 		return -errno;
 
-	writer->period_insn = period_insn;
+	if (events) {
+		writer->event_count = events->count;
+		for (i = 0; i < events->count; ++i) {
+			sanitize_field(events->items[i].name, writer->event_names[i],
+				       sizeof(writer->event_names[i]));
+		}
+	}
 	fprintf(writer->fp, "# pmi raw v3\n");
-	fprintf(writer->fp,
-		"%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t%-*s\t%s\n",
-		PMI_COL_TYPE_WIDTH, "type", PMI_COL_SEQ_WIDTH, "seq",
-		PMI_COL_INSN_WIDTH, "insn_delta", PMI_COL_PID_WIDTH, "pid",
-		PMI_COL_TID_WIDTH, "tid", PMI_COL_EVENTS_WIDTH, "events",
-		PMI_COL_TOP_WIDTH, "top", "stack");
+	fprintf(writer->fp, "type\tseq\tinsn_delta\tpid\ttid");
+	for (i = 0; i < writer->event_count; ++i)
+		fprintf(writer->fp, "\t%s", writer->event_names[i]);
+	fprintf(writer->fp, "\ttop\tstack\n");
 	return 0;
 }
 
@@ -150,7 +116,6 @@ int pmi_output_write_sample(struct pmi_output_writer *writer,
 {
 	char safe_top[PMI_MAX_SYMBOL_LEN];
 	char safe_stack[PMI_MAX_STACK_TEXT_LEN];
-	char events[PMI_MAX_FOLDED_LEN];
 	struct pmi_output_prev_state *prev;
 	uint64_t deltas[PMI_MAX_EVENTS] = { 0 };
 	uint64_t seq;
@@ -158,7 +123,6 @@ int pmi_output_write_sample(struct pmi_output_writer *writer,
 	pid_t pid;
 	pid_t tid;
 	size_t i;
-	int err;
 
 	if (!writer || !writer->fp || !sample)
 		return -EINVAL;
@@ -176,18 +140,21 @@ int pmi_output_write_sample(struct pmi_output_writer *writer,
 	sanitize_field(top && top[0] ? top : "-", safe_top, sizeof(safe_top));
 	sanitize_field(stack && stack[0] ? stack : "-", safe_stack,
 		       sizeof(safe_stack));
-	err = format_custom_events(sample, deltas, events, sizeof(events));
-	if (err)
-		return err;
 
 	seq = ++writer->seq;
 
-	if (fprintf(writer->fp,
-		    "%-*s\t%-*" PRIu64 "\t%-*" PRIu64 "\t%-*d\t%-*d\t%-*s\t%-*s\t%s\n",
-		    PMI_COL_TYPE_WIDTH, "S", PMI_COL_SEQ_WIDTH, seq,
-		    PMI_COL_INSN_WIDTH, insn_delta, PMI_COL_PID_WIDTH, pid,
-		    PMI_COL_TID_WIDTH, tid, PMI_COL_EVENTS_WIDTH, events,
-		    PMI_COL_TOP_WIDTH, safe_top, safe_stack) < 0)
+	if (fprintf(writer->fp, "S\t%" PRIu64 "\t%" PRIu64 "\t%d\t%d",
+		    seq, insn_delta, pid, tid) < 0)
+		return -EIO;
+	for (i = 0; i < writer->event_count; ++i) {
+		uint64_t value = 0;
+
+		if (i + 1 < sample->event_count)
+			value = deltas[i + 1];
+		if (fprintf(writer->fp, "\t%" PRIu64, value) < 0)
+			return -EIO;
+	}
+	if (fprintf(writer->fp, "\t%s\t%s\n", safe_top, safe_stack) < 0)
 		return -EIO;
 
 	return ferror(writer->fp) ? -EIO : 0;

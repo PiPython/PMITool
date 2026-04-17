@@ -2,7 +2,6 @@ PROJECT := pmi
 BUILD_DIR := build
 OBJ_DIR := $(BUILD_DIR)/obj
 BIN := $(BUILD_DIR)/$(PROJECT)
-USE_SYSTEM_LIBBPF ?= 0
 
 CC ?= clang
 CC_IS_GCC := $(shell printf '' | $(CC) -dM -E - 2>/dev/null | awk '/__GNUC__/ { gcc = 1 } /__clang__/ { clang = 1 } END { print (gcc && !clang) ? 1 : 0 }')
@@ -12,6 +11,7 @@ ifeq ($(CC_IS_GCC),1)
 CFLAGS += -Wno-format-truncation
 endif
 CPPFLAGS += -Iinclude -D_GNU_SOURCE
+LDLIBS += -ldl
 
 SRC := \
 	src/main.c \

@@ -19,14 +19,15 @@ struct pmi_output_prev_state {
 struct pmi_output_writer {
 	FILE *fp;
 	uint64_t seq;
-	uint64_t period_insn;
 	bool debug_perf;
+	char event_names[PMI_MAX_EVENTS - 1][PMI_MAX_EVENT_NAME];
+	size_t event_count;
 	struct pmi_output_prev_state prev[PMI_OUTPUT_MAX_TIDS];
 	size_t prev_count;
 };
 
 int pmi_output_open(struct pmi_output_writer *writer, const char *path,
-		    uint64_t period_insn);
+		    const struct pmi_event_list *events);
 int pmi_output_write_sample(struct pmi_output_writer *writer,
 			    const struct pmi_perf_sample *sample,
 			    const char *top, const char *stack);

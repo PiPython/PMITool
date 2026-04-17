@@ -15,5 +15,8 @@ int pmi_symbolizer_symbolize_ip(struct pmi_symbolizer *symbolizer, pid_t pid,
 int pmi_symbolizer_symbolize_stack(struct pmi_symbolizer *symbolizer, pid_t pid,
 				   const uint64_t *ips, size_t depth,
 				   char *folded, size_t folded_cap);
+int pmi_symbolizer_pretty_name(struct pmi_symbolizer *symbolizer,
+			       const char *raw, char *pretty,
+			       size_t pretty_cap);
 
 #endif

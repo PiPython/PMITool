@@ -11,25 +11,25 @@
 #include "pmi/strutil.h"
 #include "pmi/symbolizer.h"
 
-struct event_sum {
-	char name[PMI_MAX_EVENT_NAME];
-	uint64_t total;
+#define PMI_REPORT_MAX_FIELDS (PMI_MAX_EVENTS + 6)
+
+struct report_schema {
+	char event_names[PMI_MAX_EVENTS - 1][PMI_MAX_EVENT_NAME];
+	size_t event_count;
 };
 
 struct report_entry {
 	char top[PMI_MAX_SYMBOL_LEN];
 	size_t sample_count;
 	uint64_t insn_delta_total;
-	struct event_sum events[PMI_MAX_EVENTS];
-	size_t event_count;
+	uint64_t event_totals[PMI_MAX_EVENTS - 1];
 };
 
 struct stack_entry {
 	char stack[PMI_MAX_STACK_TEXT_LEN];
 	size_t sample_count;
 	uint64_t insn_delta_total;
-	struct event_sum events[PMI_MAX_EVENTS];
-	size_t event_count;
+	uint64_t event_totals[PMI_MAX_EVENTS - 1];
 };
 
 struct parsed_sample {
@@ -37,7 +37,8 @@ struct parsed_sample {
 	uint64_t insn_delta;
 	pid_t pid;
 	pid_t tid;
-	char events[PMI_MAX_FOLDED_LEN];
+	uint64_t event_values[PMI_MAX_EVENTS - 1];
+	size_t event_count;
 	char top[PMI_MAX_SYMBOL_LEN];
 	char stack[PMI_MAX_STACK_TEXT_LEN];
 };
@@ -52,23 +53,12 @@ static void report_usage(FILE *stream)
 		"  -l, --limit <N>              max rows, default: 20\n"
 		"  -m, --mode <overview|samples>\n"
 		"                               default: overview\n"
+		"  -t, --tid <tid1,tid2,...>    filter samples by tid list\n"
 		"  -h, --help                   show this help\n"
 		"\n"
 		"examples:\n"
 		"  pmi report -i out.pmi\n"
-		"  pmi report -i out.pmi -m samples\n");
-}
-
-static void normalize_symbol(char *symbol)
-{
-	char *plus;
-
-	if (!symbol || symbol[0] == '\0' || strncmp(symbol, "0x", 2) == 0)
-		return;
-
-	plus = strstr(symbol, "+0x");
-	if (plus)
-		*plus = '\0';
+		"  pmi report -i out.pmi -t 1234,5678 -m samples\n");
 }
 
 static char *trim_field(char *field)
@@ -97,71 +87,60 @@ static bool has_symbol_text(const char *symbol)
 	return symbol && symbol[0] != '\0' && strcmp(symbol, "-") != 0;
 }
 
-static void add_event_sum(struct event_sum *events, size_t *count,
-			  const char *name, uint64_t value)
+static bool is_tid_selected(const struct pmi_report_options *opts, pid_t tid)
 {
 	size_t i;
 
-	for (i = 0; i < *count; ++i) {
-		if (strcmp(events[i].name, name) == 0) {
-			events[i].total += value;
-			return;
+	if (!opts || opts->tid_count == 0)
+		return true;
+	for (i = 0; i < opts->tid_count; ++i) {
+		if (opts->tids[i] == tid)
+			return true;
+	}
+	return false;
+}
+
+static bool report_entry_tid_exists(const struct pmi_report_options *opts, pid_t tid)
+{
+	size_t i;
+
+	for (i = 0; i < opts->tid_count; ++i) {
+		if (opts->tids[i] == tid)
+			return true;
+	}
+	return false;
+}
+
+static int parse_tid_list(struct pmi_report_options *opts, const char *arg)
+{
+	char copy[PMI_MAX_LINE_LEN];
+	char *cursor;
+	char *token;
+
+	if (!opts || !arg)
+		return -EINVAL;
+	if (strlen(arg) >= sizeof(copy))
+		return -E2BIG;
+
+	strcpy(copy, arg);
+	cursor = copy;
+	while ((token = strsep(&cursor, ",")) != NULL) {
+		char *end = NULL;
+		long value;
+
+		if (*token == '\0')
+			return -EINVAL;
+		value = strtol(token, &end, 10);
+		if (!end || *end != '\0' || value <= 0)
+			return -EINVAL;
+		if (!report_entry_tid_exists(opts, (pid_t)value)) {
+			if (opts->tid_count >= sizeof(opts->tids) / sizeof(opts->tids[0]))
+				return -E2BIG;
+			opts->tids[opts->tid_count++] = (pid_t)value;
 		}
 	}
 
-	if (*count >= PMI_MAX_EVENTS)
-		return;
-
-	pmi_copy_cstr_trunc(events[*count].name, sizeof(events[*count].name), name);
-	events[*count].total = value;
-	(*count)++;
-}
-
-static void parse_event_blob(struct event_sum *events, size_t *count, char *blob)
-{
-	char *token;
-	char *saveptr = NULL;
-
-	if (!blob || strcmp(blob, "-") == 0)
-		return;
-
-	for (token = strtok_r(blob, ",", &saveptr); token;
-	     token = strtok_r(NULL, ",", &saveptr)) {
-		char *eq = strchr(token, '=');
-		uint64_t value;
-
-		if (!eq)
-			continue;
-		*eq = '\0';
-		value = strtoull(eq + 1, NULL, 10);
-		add_event_sum(events, count, token, value);
-	}
-}
-
-static void format_event_sums(const struct event_sum *events, size_t count, char *out,
-			      size_t out_cap)
-{
-	size_t i;
-	size_t len = 0;
-
-	if (!out || out_cap == 0)
-		return;
-
-	out[0] = '\0';
-	if (count == 0) {
-		pmi_copy_cstr_trunc(out, out_cap, "-");
-		return;
-	}
-
-	for (i = 0; i < count; ++i) {
-		int written;
-
-		written = snprintf(out + len, out_cap - len, "%s%s=%" PRIu64,
-				   i ? ", " : "", events[i].name, events[i].total);
-		if (written < 0 || (size_t)written >= out_cap - len)
-			break;
-		len += (size_t)written;
-	}
+	return 0;
 }
 
 static struct report_entry *find_or_add_report_entry(struct report_entry **entries,
@@ -244,6 +223,19 @@ static int compare_stack_entry(const void *lhs, const void *rhs)
 	return strcmp(a->stack, b->stack);
 }
 
+static void prettify_symbol(struct pmi_symbolizer *symbolizer, char *symbol,
+			    size_t symbol_cap)
+{
+	char pretty[PMI_MAX_SYMBOL_LEN];
+
+	if (!symbol || symbol[0] == '\0' || strcmp(symbol, "-") == 0)
+		return;
+	if (strncmp(symbol, "0x", 2) == 0)
+		return;
+	if (pmi_symbolizer_pretty_name(symbolizer, symbol, pretty, sizeof(pretty)) == 0)
+		pmi_copy_cstr_trunc(symbol, symbol_cap, pretty);
+}
+
 static void resolve_symbol_or_hex(struct pmi_symbolizer *symbolizer, pid_t pid,
 				  uint64_t ip, char *symbol, size_t symbol_cap)
 {
@@ -257,7 +249,7 @@ static void resolve_symbol_or_hex(struct pmi_symbolizer *symbolizer, pid_t pid,
 		return;
 	if (pmi_symbolizer_symbolize_ip(symbolizer, pid, ip, module, sizeof(module),
 					symbol, symbol_cap) == 0)
-		normalize_symbol(symbol);
+		prettify_symbol(symbolizer, symbol, symbol_cap);
 }
 
 static int append_stack_symbol(char *dst, size_t cap, const char *symbol)
@@ -280,6 +272,7 @@ static int build_symbolized_stack(struct pmi_symbolizer *symbolizer, pid_t pid,
 				  size_t out_cap)
 {
 	char stack_copy[PMI_MAX_STACK_TEXT_LEN];
+	char pretty_top[PMI_MAX_SYMBOL_LEN];
 	char *token;
 	char *saveptr = NULL;
 
@@ -287,8 +280,11 @@ static int build_symbolized_stack(struct pmi_symbolizer *symbolizer, pid_t pid,
 		return -EINVAL;
 
 	out[0] = '\0';
-	if (has_symbol_text(top))
-		pmi_copy_cstr_trunc(out, out_cap, top);
+	if (has_symbol_text(top)) {
+		pmi_copy_cstr_trunc(pretty_top, sizeof(pretty_top), top);
+		prettify_symbol(symbolizer, pretty_top, sizeof(pretty_top));
+		pmi_copy_cstr_trunc(out, out_cap, pretty_top);
+	}
 	if (!raw_stack || strcmp(raw_stack, "-") == 0)
 		return 0;
 
@@ -317,6 +313,7 @@ static int parse_report_options(int argc, char **argv, struct pmi_report_options
 		{ "input", required_argument, NULL, 'i' },
 		{ "limit", required_argument, NULL, 'l' },
 		{ "mode", required_argument, NULL, 'm' },
+		{ "tid", required_argument, NULL, 't' },
 		{ "help", no_argument, NULL, 'h' },
 		{ 0, 0, 0, 0 },
 	};
@@ -328,7 +325,7 @@ static int parse_report_options(int argc, char **argv, struct pmi_report_options
 	opterr = 0;
 	optind = 1;
 
-	while ((opt = getopt_long(argc, argv, "i:l:m:h", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "i:l:m:t:h", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'i':
 			opts->input_path = optarg;
@@ -343,6 +340,12 @@ static int parse_report_options(int argc, char **argv, struct pmi_report_options
 				opts->mode = PMI_REPORT_SAMPLES;
 			else {
 				fprintf(stderr, "invalid report mode: %s\n", optarg);
+				return -EINVAL;
+			}
+			break;
+		case 't':
+			if (parse_tid_list(opts, optarg) != 0) {
+				fprintf(stderr, "invalid tid list: %s\n", optarg);
 				return -EINVAL;
 			}
 			break;
@@ -369,80 +372,161 @@ static int parse_report_options(int argc, char **argv, struct pmi_report_options
 		fprintf(stderr, "limit must be greater than 0\n");
 		return -EINVAL;
 	}
+
 	return 0;
 }
 
-static int parse_sample_line(char *line, struct parsed_sample *sample)
+static int parse_tsv_fields(char *line, char **fields, size_t cap, size_t *count)
 {
 	char *cursor = line;
 	char *field;
-	char *fields[8] = { 0 };
-	size_t field_count = 0;
 
-	if (!line || !sample)
-		return -EINVAL;
-	if (line[0] == '#')
-		return 1;
-
-	while ((field = strsep(&cursor, "\t")) != NULL && field_count < 8) {
+	*count = 0;
+	while ((field = strsep(&cursor, "\t")) != NULL) {
+		if (*count >= cap)
+			return -E2BIG;
 		field[strcspn(field, "\r\n")] = '\0';
-		fields[field_count++] = trim_field(field);
+		fields[*count] = trim_field(field);
+		(*count)++;
 	}
-	if (field_count != 8)
+
+	return 0;
+}
+
+static int parse_header_line(char *line, struct report_schema *schema)
+{
+	char *fields[PMI_REPORT_MAX_FIELDS] = { 0 };
+	size_t field_count = 0;
+	size_t i;
+	int err;
+
+	if (!line || !schema)
+		return -EINVAL;
+
+	err = parse_tsv_fields(line, fields, PMI_REPORT_MAX_FIELDS, &field_count);
+	if (err)
+		return err;
+	if (field_count < 7)
+		return -EINVAL;
+	if (strcmp(fields[0], "type") != 0 || strcmp(fields[1], "seq") != 0 ||
+	    strcmp(fields[2], "insn_delta") != 0 || strcmp(fields[3], "pid") != 0 ||
+	    strcmp(fields[4], "tid") != 0 ||
+	    strcmp(fields[field_count - 2], "top") != 0 ||
+	    strcmp(fields[field_count - 1], "stack") != 0)
+		return -EINVAL;
+
+	memset(schema, 0, sizeof(*schema));
+	schema->event_count = field_count - 7;
+	for (i = 0; i < schema->event_count; ++i) {
+		pmi_copy_cstr_trunc(schema->event_names[i],
+				    sizeof(schema->event_names[i]),
+				    fields[5 + i]);
+	}
+
+	return 0;
+}
+
+static int parse_sample_line(char *line, const struct report_schema *schema,
+			     struct parsed_sample *sample)
+{
+	char *fields[PMI_REPORT_MAX_FIELDS] = { 0 };
+	size_t field_count = 0;
+	size_t i;
+	size_t top_idx;
+	size_t stack_idx;
+	int err;
+
+	if (!line || !schema || !sample)
+		return -EINVAL;
+	if (line[0] == '#' || line[0] == '\0' || line[0] == '\n')
 		return 1;
-	if (strcmp(fields[0], "type") == 0)
+
+	err = parse_tsv_fields(line, fields, PMI_REPORT_MAX_FIELDS, &field_count);
+	if (err)
+		return err;
+	if (field_count == 0 || strcmp(fields[0], "type") == 0)
 		return 1;
 	if (strcmp(fields[0], "S") != 0)
 		return 1;
+	if (field_count != schema->event_count + 7)
+		return -EINVAL;
 
 	memset(sample, 0, sizeof(*sample));
 	sample->seq = strtoull(fields[1], NULL, 10);
 	sample->insn_delta = strtoull(fields[2], NULL, 10);
 	sample->pid = (pid_t)strtol(fields[3], NULL, 10);
 	sample->tid = (pid_t)strtol(fields[4], NULL, 10);
-	pmi_copy_cstr_trunc(sample->events, sizeof(sample->events), fields[5]);
-	pmi_copy_cstr_trunc(sample->top, sizeof(sample->top), fields[6]);
-	pmi_copy_cstr_trunc(sample->stack, sizeof(sample->stack), fields[7]);
-	normalize_symbol(sample->top);
+	sample->event_count = schema->event_count;
+	for (i = 0; i < schema->event_count; ++i)
+		sample->event_values[i] = strtoull(fields[5 + i], NULL, 10);
+	top_idx = 5 + schema->event_count;
+	stack_idx = top_idx + 1;
+	pmi_copy_cstr_trunc(sample->top, sizeof(sample->top), fields[top_idx]);
+	pmi_copy_cstr_trunc(sample->stack, sizeof(sample->stack), fields[stack_idx]);
 	return 0;
 }
 
-static int run_samples_report(FILE *fp, struct pmi_symbolizer *symbolizer)
+static void print_event_headers(const struct report_schema *schema)
+{
+	size_t i;
+
+	for (i = 0; i < schema->event_count; ++i)
+		printf("\t%s", schema->event_names[i]);
+}
+
+static void print_event_values(const uint64_t *values, size_t count)
+{
+	size_t i;
+
+	for (i = 0; i < count; ++i)
+		printf("\t%" PRIu64, values[i]);
+}
+
+static int run_samples_report(FILE *fp, struct pmi_symbolizer *symbolizer,
+			      const struct pmi_report_options *opts,
+			      const struct report_schema *schema)
 {
 	char line[PMI_MAX_LINE_LEN];
 
-	printf("%-8s %-8s %-8s %-16s %-24s %-32s %s\n", "seq", "pid", "tid",
-	       "insn_delta", "events", "top", "stack");
+	printf("seq\tpid\ttid\tinsn_delta");
+	print_event_headers(schema);
+	printf("\ttop\tstack\n");
 
 	while (fgets(line, sizeof(line), fp)) {
 		struct parsed_sample sample;
 		char symbolized_stack[PMI_MAX_STACK_TEXT_LEN];
 		int err;
 
-		err = parse_sample_line(line, &sample);
+		err = parse_sample_line(line, schema, &sample);
 		if (err == 1)
 			continue;
 		if (err != 0)
 			return err;
+		if (!is_tid_selected(opts, sample.tid))
+			continue;
 
+		prettify_symbol(symbolizer, sample.top, sizeof(sample.top));
 		if (strcmp(sample.stack, "-") == 0) {
-			pmi_copy_cstr_trunc(symbolized_stack, sizeof(symbolized_stack), "-");
+			pmi_copy_cstr_trunc(symbolized_stack, sizeof(symbolized_stack),
+					    "-");
 		} else {
 			build_symbolized_stack(symbolizer, sample.pid, sample.top,
 					       sample.stack, symbolized_stack,
 					       sizeof(symbolized_stack));
 		}
 
-		printf("%-8" PRIu64 " %-8d %-8d %-16" PRIu64 " %-24s %-32s %s\n",
-		       sample.seq, sample.pid, sample.tid, sample.insn_delta,
-		       sample.events, sample.top, symbolized_stack);
+		printf("%" PRIu64 "\t%d\t%d\t%" PRIu64, sample.seq, sample.pid,
+		       sample.tid, sample.insn_delta);
+		print_event_values(sample.event_values, schema->event_count);
+		printf("\t%s\t%s\n", sample.top, symbolized_stack);
 	}
 
 	return 0;
 }
 
 static int run_overview_report(FILE *fp, struct pmi_symbolizer *symbolizer,
-			       const struct pmi_report_options *opts)
+			       const struct pmi_report_options *opts,
+			       const struct report_schema *schema)
 {
 	struct report_entry *entries = NULL;
 	struct stack_entry *stack_entries = NULL;
@@ -457,14 +541,17 @@ static int run_overview_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 	while (fgets(line, sizeof(line), fp)) {
 		struct parsed_sample sample;
 		struct report_entry *entry;
-		char event_copy[PMI_MAX_FOLDED_LEN];
+		size_t j;
 
-		err = parse_sample_line(line, &sample);
+		err = parse_sample_line(line, schema, &sample);
 		if (err == 1)
 			continue;
 		if (err != 0)
 			goto out;
+		if (!is_tid_selected(opts, sample.tid))
+			continue;
 
+		prettify_symbol(symbolizer, sample.top, sizeof(sample.top));
 		entry = find_or_add_report_entry(&entries, &count, &cap, sample.top);
 		if (!entry) {
 			err = -ENOMEM;
@@ -472,8 +559,8 @@ static int run_overview_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 		}
 		entry->sample_count++;
 		entry->insn_delta_total += sample.insn_delta;
-		pmi_copy_cstr_trunc(event_copy, sizeof(event_copy), sample.events);
-		parse_event_blob(entry->events, &entry->event_count, event_copy);
+		for (j = 0; j < schema->event_count; ++j)
+			entry->event_totals[j] += sample.event_values[j];
 
 		if (strcmp(sample.stack, "-") != 0) {
 			struct stack_entry *stack_entry;
@@ -492,9 +579,8 @@ static int run_overview_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 			}
 			stack_entry->sample_count++;
 			stack_entry->insn_delta_total += sample.insn_delta;
-			pmi_copy_cstr_trunc(event_copy, sizeof(event_copy), sample.events);
-			parse_event_blob(stack_entry->events, &stack_entry->event_count,
-					 event_copy);
+			for (j = 0; j < schema->event_count; ++j)
+				stack_entry->event_totals[j] += sample.event_values[j];
 		}
 	}
 
@@ -502,30 +588,27 @@ static int run_overview_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 	qsort(stack_entries, stack_count, sizeof(*stack_entries),
 	      compare_stack_entry);
 
-	printf("%-8s %-16s %-32s %s\n", "samples", "insn_delta", "top", "events");
+	printf("samples\tinsn_delta");
+	print_event_headers(schema);
+	printf("\ttop\n");
 	for (i = 0; i < count && i < opts->limit; ++i) {
-		char event_text[PMI_MAX_FOLDED_LEN];
-
-		format_event_sums(entries[i].events, entries[i].event_count, event_text,
-				  sizeof(event_text));
-		printf("%-8zu %-16" PRIu64 " %-32s %s\n", entries[i].sample_count,
-		       entries[i].insn_delta_total, entries[i].top, event_text);
+		printf("%zu\t%" PRIu64, entries[i].sample_count,
+		       entries[i].insn_delta_total);
+		print_event_values(entries[i].event_totals, schema->event_count);
+		printf("\t%s\n", entries[i].top);
 	}
 
 	if (stack_count > 0) {
 		printf("\nfull stacks\n");
-		printf("%-8s %-16s %-60s %s\n", "samples", "insn_delta", "stack",
-		       "events");
+		printf("samples\tinsn_delta");
+		print_event_headers(schema);
+		printf("\tstack\n");
 		for (i = 0; i < stack_count && i < opts->limit; ++i) {
-			char event_text[PMI_MAX_FOLDED_LEN];
-
-			format_event_sums(stack_entries[i].events,
-					  stack_entries[i].event_count, event_text,
-					  sizeof(event_text));
-			printf("%-8zu %-16" PRIu64 " %-60s %s\n",
-			       stack_entries[i].sample_count,
-			       stack_entries[i].insn_delta_total,
-			       stack_entries[i].stack, event_text);
+			printf("%zu\t%" PRIu64, stack_entries[i].sample_count,
+			       stack_entries[i].insn_delta_total);
+			print_event_values(stack_entries[i].event_totals,
+					   schema->event_count);
+			printf("\t%s\n", stack_entries[i].stack);
 		}
 	}
 
@@ -538,9 +621,11 @@ out:
 int pmi_report_main(int argc, char **argv)
 {
 	struct pmi_report_options opts;
+	struct report_schema schema;
 	struct pmi_symbolizer *symbolizer = NULL;
 	FILE *fp;
 	char magic[64];
+	char header[PMI_MAX_LINE_LEN];
 	int err;
 
 	err = parse_report_options(argc, argv, &opts);
@@ -571,11 +656,19 @@ int pmi_report_main(int argc, char **argv)
 		pmi_symbolizer_destroy(symbolizer);
 		return 1;
 	}
+	if (!fgets(header, sizeof(header), fp) ||
+	    parse_header_line(header, &schema) != 0) {
+		fprintf(stderr, "%s has an invalid pmi raw v3 header\n",
+			opts.input_path);
+		fclose(fp);
+		pmi_symbolizer_destroy(symbolizer);
+		return 1;
+	}
 
 	if (opts.mode == PMI_REPORT_SAMPLES)
-		err = run_samples_report(fp, symbolizer);
+		err = run_samples_report(fp, symbolizer, &opts, &schema);
 	else
-		err = run_overview_report(fp, symbolizer, &opts);
+		err = run_overview_report(fp, symbolizer, &opts, &schema);
 
 	fclose(fp);
 	pmi_symbolizer_destroy(symbolizer);
