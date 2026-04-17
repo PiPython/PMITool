@@ -31,9 +31,11 @@ int main(void)
 	char input_path[] = "/tmp/pmi-report-input-XXXXXX";
 	char output_overview_path[] = "/tmp/pmi-report-overview-XXXXXX";
 	char output_samples_path[] = "/tmp/pmi-report-samples-XXXXXX";
+	char output_visual_path[] = "/tmp/pmi-report-visual-XXXXXX";
 	char line[1024];
 	char output[16384] = { 0 };
 	char samples_output[16384] = { 0 };
+	char visual_output[32768] = { 0 };
 	char stack_field[128];
 	char mangled_top[64];
 	char long_top_field[64];
@@ -42,11 +44,18 @@ int main(void)
 				  "202", NULL };
 	char *samples_argv[] = { "report", "-i", input_path, "-m", "samples",
 				 "-t", "202", NULL };
+	char *visual_argv[] = { "report", "-i", input_path, "-m", "visual",
+				"-o", output_visual_path, "-w", "2", "-l", "2",
+				"-t", "202", NULL };
+	char *visual_bad_argv[] = { "report", "-i", input_path, "-m", "visual",
+				    NULL };
 	FILE *fp;
 	int input_fd;
 	int output_fd;
 	int samples_output_fd;
+	int visual_output_fd;
 	int saved_stdout;
+	int saved_stderr;
 	int err;
 	uint64_t parent_ip = (uint64_t)(uintptr_t)&report_fixture_parent;
 	uint64_t long_top_ip =
@@ -155,8 +164,45 @@ int main(void)
 	CHECK(strstr(samples_output, long_top_field) == NULL);
 	CHECK(strstr(samples_output, "...") != NULL);
 
+	visual_output_fd = mkstemp(output_visual_path);
+	CHECK(visual_output_fd >= 0);
+	close(visual_output_fd);
+
+	err = pmi_report_main(13, visual_argv);
+	CHECK(err == 0);
+
+	fp = fopen(output_visual_path, "r");
+	CHECK(fp != NULL);
+	while (fgets(line, sizeof(line), fp) != NULL)
+		strncat(visual_output, line,
+			sizeof(visual_output) - strlen(visual_output) - 1);
+	fclose(fp);
+
+	CHECK(strstr(visual_output, "<!doctype html>") != NULL);
+	CHECK(strstr(visual_output, "const reportData =") != NULL);
+	CHECK(strstr(visual_output, "windowSamples: 2") != NULL);
+	CHECK(strstr(visual_output, "tid-select") != NULL);
+	CHECK(strstr(visual_output, "热点函数 × 窗口") != NULL);
+	CHECK(strstr(visual_output, "总 sample 数趋势") != NULL);
+	CHECK(strstr(visual_output, "foo::bar(int)") != NULL);
+	CHECK(strstr(visual_output, mangled_top) == NULL);
+	CHECK(strstr(visual_output, long_top_field) == NULL);
+	CHECK(strstr(visual_output, stack_field) == NULL);
+
+	saved_stderr = dup(STDERR_FILENO);
+	CHECK(saved_stderr >= 0);
+	visual_output_fd = open("/dev/null", O_WRONLY);
+	CHECK(visual_output_fd >= 0);
+	CHECK(dup2(visual_output_fd, STDERR_FILENO) >= 0);
+	close(visual_output_fd);
+	err = pmi_report_main(5, visual_bad_argv);
+	CHECK(dup2(saved_stderr, STDERR_FILENO) >= 0);
+	close(saved_stderr);
+	CHECK(err == 1);
+
 	unlink(input_path);
 	unlink(output_overview_path);
 	unlink(output_samples_path);
+	unlink(output_visual_path);
 	return 0;
 }

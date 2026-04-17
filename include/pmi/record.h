@@ -31,12 +31,15 @@ struct pmi_record_options {
 
 struct pmi_report_options {
 	const char *input_path;
+	const char *output_path;
 	size_t limit;
+	size_t window_samples;
 	pid_t tids[1024];
 	size_t tid_count;
 	enum {
 		PMI_REPORT_OVERVIEW = 0,
 		PMI_REPORT_SAMPLES = 1,
+		PMI_REPORT_VISUAL = 2,
 	} mode;
 };
 
