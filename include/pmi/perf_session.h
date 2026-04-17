@@ -41,6 +41,7 @@ struct pmi_perf_session {
 	size_t mmap_len;
 	uint64_t stream_id;
 	char comm[PMI_COMM_LEN];
+	bool debug_perf;
 	bool pending_lost;
 	struct bpf_link *link;
 	struct pmi_opened_event events[PMI_MAX_EVENTS];

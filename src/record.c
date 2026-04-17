@@ -9,6 +9,7 @@
 #include <libgen.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,11 +63,27 @@ static void record_usage(FILE *stream)
 		"  -s, --stack <top|full>     stack mode; default: top\n"
 		"  -k, --kernel-stack <on|off>\n"
 		"                             capture kernel stack in BPF, default: off\n"
+		"      --debug-perf           print perf_session debug logs to stderr\n"
 		"  -h, --help                 show this help\n"
 		"\n"
 		"examples:\n"
 		"  pmi record -p 1234 -o out.pmi\n"
 		"  pmi record -c './bench' -n 100000 -e r0010,r0011 -s full -o out.pmi\n");
+}
+
+static void record_debugf(const struct record_runtime *rt, const char *scope,
+			  const char *fmt, ...)
+{
+	va_list ap;
+
+	if (!rt || !rt->opts.debug_perf)
+		return;
+
+	fprintf(stderr, "[record][%s] ", scope);
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fputc('\n', stderr);
 }
 
 static void on_signal(int signo)
@@ -330,6 +347,7 @@ static int parse_record_options(int argc, char **argv, struct pmi_record_options
 		{ "period-insn", required_argument, NULL, 'n' },
 		{ "stack", required_argument, NULL, 's' },
 		{ "kernel-stack", required_argument, NULL, 'k' },
+		{ "debug-perf", no_argument, NULL, 1001 },
 		{ "help", no_argument, NULL, 'h' },
 		{ "event", required_argument, NULL, 1000 },
 		{ 0, 0, 0, 0 },
@@ -390,6 +408,9 @@ static int parse_record_options(int argc, char **argv, struct pmi_record_options
 					optarg);
 				return -EINVAL;
 			}
+			break;
+		case 1001:
+			opts->debug_perf = true;
 			break;
 		case 'h':
 			record_usage(stdout);
@@ -459,10 +480,30 @@ static void close_runtime(struct record_runtime *rt)
 	int status;
 
 	if (rt->joiner) {
-		pmi_bpf_runtime_poll(&rt->bpf, 0);
-		for (i = 0; i < rt->session_count; ++i)
-			pmi_perf_session_drain(&rt->sessions[i], on_perf_sample, rt->joiner);
-		pmi_joiner_flush(rt->joiner);
+		int err;
+
+		if (rt->bpf.ringbuf) {
+			err = pmi_bpf_runtime_poll(&rt->bpf, 0);
+			if (err < 0)
+				record_debugf(rt, "error",
+					      "stage=close-bpf-poll err=%d (%s)",
+					      -err, strerror(-err));
+		}
+		for (i = 0; i < rt->session_count; ++i) {
+			err = pmi_perf_session_drain(&rt->sessions[i], on_perf_sample,
+						     rt->joiner);
+			if (err)
+				record_debugf(rt, "error",
+					      "stage=close-drain tid=%d leader_fd=%d err=%d (%s)",
+					      rt->sessions[i].tid,
+					      rt->sessions[i].leader_fd, -err,
+					      strerror(-err));
+		}
+		err = pmi_joiner_flush(rt->joiner);
+		if (err)
+			record_debugf(rt, "error",
+				      "stage=close-join-flush err=%d (%s)", -err,
+				      strerror(-err));
 	}
 	for (i = 0; i < rt->session_count; ++i)
 		pmi_perf_session_close(&rt->sessions[i]);
@@ -594,9 +635,29 @@ int pmi_record_main(int argc, char **argv)
 		}
 
 		poll(fds, nfds, rt.opts.poll_timeout_ms);
-		pmi_bpf_runtime_poll(&rt.bpf, 0);
-		for (i = 0; i < rt.session_count; ++i)
-			pmi_perf_session_drain(&rt.sessions[i], on_perf_sample, rt.joiner);
+		err = pmi_bpf_runtime_poll(&rt.bpf, 0);
+		if (err < 0) {
+			record_debugf(&rt, "error",
+				      "stage=bpf-poll err=%d (%s)", -err,
+				      strerror(-err));
+			g_stop = 1;
+			break;
+		}
+		for (i = 0; i < rt.session_count; ++i) {
+			err = pmi_perf_session_drain(&rt.sessions[i], on_perf_sample,
+						     rt.joiner);
+			if (err) {
+				record_debugf(&rt, "error",
+					      "stage=drain tid=%d leader_fd=%d err=%d (%s)",
+					      rt.sessions[i].tid,
+					      rt.sessions[i].leader_fd, -err,
+					      strerror(-err));
+				g_stop = 1;
+				break;
+			}
+		}
+		if (g_stop)
+			break;
 
 		if (rt.opts.pid || rt.opts.cmd)
 			attach_target_threads(&rt, rt.target_pid);
