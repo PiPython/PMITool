@@ -6,7 +6,6 @@
 #include <getopt.h>
 #include <inttypes.h>
 #include <limits.h>
-#include <libgen.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -17,11 +16,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <bpf/libbpf.h>
-
-#include "pmi/bpf_loader.h"
 #include "pmi/event.h"
-#include "pmi/joiner.h"
 #include "pmi/output.h"
 #include "pmi/perf_session.h"
 #include "pmi/procfs.h"
@@ -36,8 +31,6 @@ static volatile sig_atomic_t g_stop;
 struct record_runtime {
 	struct pmi_record_options opts;
 	struct pmi_event_list events;
-	struct pmi_bpf_runtime bpf;
-	struct pmi_joiner *joiner;
 	struct pmi_output_writer writer;
 	struct pmi_symbolizer *symbolizer;
 	struct pmi_perf_session sessions[PMI_MAX_TRACKED_TIDS];
@@ -62,7 +55,7 @@ static void record_usage(FILE *stream)
 		"                             may be repeated; only CPU PMU raw events are supported\n"
 		"  -s, --stack <top|full>     stack mode; default: top\n"
 		"  -k, --kernel-stack <on|off>\n"
-		"                             capture kernel stack in BPF, default: off\n"
+		"                             include kernel samples and kernel callchain, default: off\n"
 		"      --debug-perf           print perf_session debug logs to stderr\n"
 		"  -h, --help                 show this help\n"
 		"\n"
@@ -143,49 +136,31 @@ static void format_stack_ips(const uint64_t *ips, size_t depth, char *out,
 		pmi_copy_cstr_trunc(out, out_cap, "-");
 }
 
-static int on_joined_sample(const struct pmi_joined_sample *sample, void *ctx)
+static int on_perf_sample(const struct pmi_perf_sample *sample, void *ctx)
 {
 	struct record_runtime *rt = ctx;
 	char module[PMI_MAX_MODULE_LEN];
 	char symbol[PMI_MAX_SYMBOL_LEN];
 	char stack[PMI_MAX_STACK_TEXT_LEN];
-	uint64_t ips[PMI_MAX_STACK_DEPTH] = { 0 };
-	uint64_t ip;
-	pid_t pid;
 
 	if (!sample)
 		return 0;
 
-	ip = sample->bpf.ip ? sample->bpf.ip : sample->perf.ip;
-	pid = sample->perf.pid ? sample->perf.pid : (pid_t)sample->bpf.pid;
-	pmi_copy_cstr_trunc(symbol, sizeof(symbol), ip ? "-" : "0x0");
+	pmi_copy_cstr_trunc(symbol, sizeof(symbol), sample->ip ? "-" : "0x0");
 	pmi_copy_cstr_trunc(stack, sizeof(stack), "-");
 
-	if (ip) {
-		pmi_symbolizer_symbolize_ip(rt->symbolizer, pid, ip, module,
+	if (sample->ip) {
+		pmi_symbolizer_symbolize_ip(rt->symbolizer, sample->pid, sample->ip, module,
 					    sizeof(module), symbol,
 					    sizeof(symbol));
 		normalize_symbol(symbol);
 	}
 
-	if (rt->opts.stack_mode == PMI_STACK_FULL && sample->bpf.user_stack_id >= 0) {
-		if (pmi_bpf_runtime_read_stack(&rt->bpf, sample->bpf.user_stack_id, ips,
-					       PMI_MAX_STACK_DEPTH) == 0)
-			format_stack_ips(ips, PMI_MAX_STACK_DEPTH, stack,
-					sizeof(stack));
-	}
+	if (rt->opts.stack_mode == PMI_STACK_FULL && sample->callchain_count > 0)
+		format_stack_ips(sample->callchain, sample->callchain_count, stack,
+				 sizeof(stack));
 
 	return pmi_output_write_sample(&rt->writer, sample, symbol, stack);
-}
-
-static int on_perf_sample(const struct pmi_perf_sample *sample, void *ctx)
-{
-	return pmi_joiner_push_perf(ctx, sample);
-}
-
-static int on_bpf_event(const struct pmi_bpf_event *event, void *ctx)
-{
-	return pmi_joiner_push_bpf(ctx, event);
 }
 
 static int attach_tid(struct record_runtime *rt, pid_t tid)
@@ -202,11 +177,6 @@ static int attach_tid(struct record_runtime *rt, pid_t tid)
 	err = pmi_perf_session_open(session, tid, &rt->opts, &rt->events);
 	if (err)
 		return err;
-	err = pmi_bpf_runtime_attach_session(&rt->bpf, session);
-	if (err) {
-		pmi_perf_session_close(session);
-		return err;
-	}
 	err = pmi_perf_session_enable(session);
 	if (err) {
 		pmi_perf_session_close(session);
@@ -442,67 +412,20 @@ static int parse_record_options(int argc, char **argv, struct pmi_record_options
 	return 0;
 }
 
-static int resolve_bpf_object_path(char *path, size_t cap)
-{
-	char exe_path[PATH_MAX];
-	char dirbuf[PATH_MAX];
-	ssize_t len;
-
-	if (!path || cap == 0)
-		return -EINVAL;
-
-	len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-	if (len < 0)
-		return -errno;
-	exe_path[len] = '\0';
-
-	if (pmi_copy_cstr(dirbuf, sizeof(dirbuf), exe_path) != 0)
-		return -E2BIG;
-
-	if (snprintf(path, cap, "%s/bpf/pmi.bpf.o", dirname(dirbuf)) >= (int)cap)
-		return -E2BIG;
-
-	if (access(path, R_OK) == 0)
-		return 0;
-
-	if (snprintf(path, cap, "build/bpf/pmi.bpf.o") >= (int)cap)
-		return -E2BIG;
-
-	if (access(path, R_OK) == 0)
-		return 0;
-
-	return -ENOENT;
-}
-
 static void close_runtime(struct record_runtime *rt)
 {
 	size_t i;
 	int status;
 
-	if (rt->joiner) {
+	for (i = 0; i < rt->session_count; ++i) {
 		int err;
 
-		if (rt->bpf.ringbuf) {
-			err = pmi_bpf_runtime_poll(&rt->bpf, 0);
-			if (err < 0)
-				record_debugf(rt, "error",
-					      "stage=close-bpf-poll err=%d (%s)",
-					      -err, strerror(-err));
-		}
-		for (i = 0; i < rt->session_count; ++i) {
-			err = pmi_perf_session_drain(&rt->sessions[i], on_perf_sample,
-						     rt->joiner);
-			if (err)
-				record_debugf(rt, "error",
-					      "stage=close-drain tid=%d leader_fd=%d err=%d (%s)",
-					      rt->sessions[i].tid,
-					      rt->sessions[i].leader_fd, -err,
-					      strerror(-err));
-		}
-		err = pmi_joiner_flush(rt->joiner);
+		err = pmi_perf_session_drain(&rt->sessions[i], on_perf_sample, rt);
 		if (err)
 			record_debugf(rt, "error",
-				      "stage=close-join-flush err=%d (%s)", -err,
+				      "stage=close-drain tid=%d leader_fd=%d err=%d (%s)",
+				      rt->sessions[i].tid,
+				      rt->sessions[i].leader_fd, -err,
 				      strerror(-err));
 	}
 	for (i = 0; i < rt->session_count; ++i) {
@@ -520,8 +443,6 @@ static void close_runtime(struct record_runtime *rt)
 	}
 	for (i = 0; i < rt->session_count; ++i)
 		pmi_perf_session_close(&rt->sessions[i]);
-	pmi_joiner_destroy(rt->joiner);
-	pmi_bpf_runtime_close(&rt->bpf);
 	pmi_output_close(&rt->writer);
 	pmi_symbolizer_destroy(rt->symbolizer);
 	if (rt->child_pid > 0) {
@@ -534,8 +455,6 @@ int pmi_record_main(int argc, char **argv)
 {
 	struct record_runtime rt;
 	struct sigaction sa = { 0 };
-	struct pmi_bpf_config cfg;
-	char bpf_obj_path[PATH_MAX];
 	const char *raw_event_ptrs[PMI_MAX_EVENTS - 1];
 	size_t i;
 	int err;
@@ -588,30 +507,6 @@ int pmi_record_main(int argc, char **argv)
 		close_runtime(&rt);
 		return 1;
 	}
-	err = pmi_joiner_init(&rt.joiner, on_joined_sample, &rt);
-	if (err) {
-		fprintf(stderr, "joiner init failed: %s\n", strerror(-err));
-		close_runtime(&rt);
-		return 1;
-	}
-
-	cfg.stack_mode = rt.opts.stack_mode;
-	cfg.capture_kernel_stack = rt.opts.capture_kernel_stack ? 1 : 0;
-	err = resolve_bpf_object_path(bpf_obj_path, sizeof(bpf_obj_path));
-	if (err) {
-		fprintf(stderr,
-			"cannot find pmi.bpf.o; expected next to the executable or in ./build/bpf/\n");
-		close_runtime(&rt);
-		return 1;
-	}
-	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
-	err = pmi_bpf_runtime_open(&rt.bpf, bpf_obj_path, &cfg, on_bpf_event,
-				   rt.joiner);
-	if (err) {
-		fprintf(stderr, "bpf open failed: %s\n", strerror(-err));
-		close_runtime(&rt);
-		return 1;
-	}
 
 	if (rt.opts.tid)
 		err = attach_tid(&rt, rt.target_pid);
@@ -631,16 +526,9 @@ int pmi_record_main(int argc, char **argv)
 	sigaction(SIGTERM, &sa, NULL);
 
 	while (!g_stop) {
-		struct pollfd fds[PMI_MAX_TRACKED_TIDS + 1];
+		struct pollfd fds[PMI_MAX_TRACKED_TIDS];
 		nfds_t nfds = 0;
 		int status;
-		int ring_fd = ring_buffer__epoll_fd(rt.bpf.ringbuf);
-
-		if (ring_fd >= 0) {
-			fds[nfds].fd = ring_fd;
-			fds[nfds].events = POLLIN;
-			nfds++;
-		}
 		for (i = 0; i < rt.session_count; ++i) {
 			fds[nfds].fd = rt.sessions[i].leader_fd;
 			fds[nfds].events = POLLIN;
@@ -648,17 +536,9 @@ int pmi_record_main(int argc, char **argv)
 		}
 
 		poll(fds, nfds, rt.opts.poll_timeout_ms);
-		err = pmi_bpf_runtime_poll(&rt.bpf, 0);
-		if (err < 0) {
-			record_debugf(&rt, "error",
-				      "stage=bpf-poll err=%d (%s)", -err,
-				      strerror(-err));
-			g_stop = 1;
-			break;
-		}
 		for (i = 0; i < rt.session_count; ++i) {
 			err = pmi_perf_session_drain(&rt.sessions[i], on_perf_sample,
-						     rt.joiner);
+						     &rt);
 			if (err) {
 				record_debugf(&rt, "error",
 					      "stage=drain tid=%d leader_fd=%d err=%d (%s)",

@@ -65,6 +65,22 @@ static const char *perf_record_type_name(uint32_t type)
 	}
 }
 
+static bool is_perf_context_marker(uint64_t ip)
+{
+	switch (ip) {
+	case (uint64_t)PERF_CONTEXT_HV:
+	case (uint64_t)PERF_CONTEXT_KERNEL:
+	case (uint64_t)PERF_CONTEXT_USER:
+	case (uint64_t)PERF_CONTEXT_GUEST:
+	case (uint64_t)PERF_CONTEXT_GUEST_KERNEL:
+	case (uint64_t)PERF_CONTEXT_GUEST_USER:
+	case (uint64_t)PERF_CONTEXT_MAX:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static int perf_decode_error(const struct pmi_perf_session *session,
 			     const unsigned char *cursor, const void *data,
 			     const unsigned char *end, size_t len,
@@ -452,15 +468,29 @@ static int pmi_perf_decode_sample_impl(const struct pmi_perf_session *session,
 
 	if (sample_type & PERF_SAMPLE_CALLCHAIN) {
 		uint64_t nr_callchain;
+		size_t depth = 0;
+		size_t j;
 
 		if ((size_t)(end - cursor) < sizeof(uint64_t))
 			return perf_decode_error(session, cursor, data, end, len,
 						 sample_type, "PERF_SAMPLE_CALLCHAIN.nr");
 		memcpy(&nr_callchain, cursor, sizeof(uint64_t));
-		cursor += sizeof(uint64_t) + nr_callchain * sizeof(uint64_t);
-		if (cursor > end)
+		cursor += sizeof(uint64_t);
+		if ((size_t)(end - cursor) < nr_callchain * sizeof(uint64_t))
 			return perf_decode_error(session, cursor, data, end, len,
 						 sample_type, "PERF_SAMPLE_CALLCHAIN.frames");
+		for (j = 0; j < nr_callchain; ++j) {
+			uint64_t ip;
+
+			memcpy(&ip, cursor, sizeof(ip));
+			cursor += sizeof(ip);
+			if (is_perf_context_marker(ip) || ip == 0)
+				continue;
+			if (depth >= PMI_MAX_STACK_DEPTH)
+				continue;
+			sample->callchain[depth++] = ip;
+		}
+		sample->callchain_count = depth;
 	}
 
 	return 0;
@@ -503,6 +533,11 @@ int pmi_perf_session_open(struct pmi_perf_session *session, pid_t tid,
 	session->tid = tid;
 	session->debug_perf = opts->debug_perf;
 	session->sample_period = leader.sample_period;
+	if (opts->stack_mode == PMI_STACK_FULL)
+		leader.sample_type |= PERF_SAMPLE_CALLCHAIN;
+	leader.exclude_callchain_kernel = opts->capture_kernel_stack ? 0 : 1;
+	leader.exclude_callchain_user = 0;
+	session->sample_type = leader.sample_type;
 	for (i = 0; i < PMI_MAX_EVENTS; ++i)
 		session->events[i].fd = -1;
 
@@ -674,17 +709,14 @@ int pmi_perf_session_drain(struct pmi_perf_session *session, pmi_perf_sample_cb 
 
 		if (hdr.type == PERF_RECORD_SAMPLE) {
 			struct pmi_perf_sample sample;
-			uint64_t sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID |
-					       PERF_SAMPLE_TIME | PERF_SAMPLE_CPU |
-					       PERF_SAMPLE_READ | PERF_SAMPLE_STREAM_ID;
 
 			perf_debugf(session, "decode",
 				    "tid=%d record=sample size=%u sample_type=0x%" PRIx64,
-				    session->tid, hdr.size, sample_type);
+				    session->tid, hdr.size, session->sample_type);
 			err = pmi_perf_decode_sample_impl(session,
 						       stack_buf + sizeof(hdr),
 						       hdr.size - sizeof(hdr),
-						       sample_type, &sample);
+						       session->sample_type, &sample);
 			if (err) {
 				perf_debugf(session, "error",
 					    "tid=%d stage=decode record=sample size=%u err=%d (%s)",
@@ -698,9 +730,10 @@ int pmi_perf_session_drain(struct pmi_perf_session *session, pmi_perf_sample_cb 
 			session->pending_lost = false;
 			session->samples_seen++;
 			perf_debugf(session, "decode",
-				    "tid=%d sample pid=%d tid=%d cpu=%u stream=%" PRIu64 " ip=0x%" PRIx64 " event_count=%zu",
+				    "tid=%d sample pid=%d tid=%d cpu=%u stream=%" PRIu64 " ip=0x%" PRIx64 " event_count=%zu callchain_count=%zu",
 				    session->tid, sample.pid, sample.tid, sample.cpu,
-				    sample.stream_id, sample.ip, sample.event_count);
+				    sample.stream_id, sample.ip, sample.event_count,
+				    sample.callchain_count);
 			if (sample.event_count > 0) {
 				session->last_leader_count = sample.events[0].value;
 				session->last_sample_leader_count = sample.events[0].value;
@@ -736,8 +769,6 @@ void pmi_perf_session_close(struct pmi_perf_session *session)
 
 	if (!session)
 		return;
-	if (session->link)
-		bpf_link__destroy(session->link);
 	if (session->mmap_base)
 		munmap(session->mmap_base, session->mmap_len);
 	for (i = 0; i < session->event_count; ++i) {

@@ -35,7 +35,7 @@ int main(void)
 {
 	char path[] = "/tmp/pmi-output-v2-XXXXXX";
 	struct pmi_output_writer writer;
-	struct pmi_joined_sample sample;
+	struct pmi_perf_sample sample;
 	FILE *fp;
 	char header[64];
 	char columns[256];
@@ -49,18 +49,16 @@ int main(void)
 	close(fd);
 
 	memset(&sample, 0, sizeof(sample));
-	sample.bpf.user_stack_id = -1;
-	sample.bpf.kernel_stack_id = -1;
-	sample.perf.pid = 11;
-	sample.perf.tid = 22;
-	sample.perf.ip = 0x1234;
-	sample.perf.event_count = 3;
-	sample.perf.events[0].value = 1000000;
-	sample.perf.events[1].value = 7;
-	sample.perf.events[2].value = 9;
-	strcpy(sample.perf.event_names[0], "instructions");
-	strcpy(sample.perf.event_names[1], "r0010");
-	strcpy(sample.perf.event_names[2], "r0011");
+	sample.pid = 11;
+	sample.tid = 22;
+	sample.ip = 0x1234;
+	sample.event_count = 3;
+	sample.events[0].value = 1000000;
+	sample.events[1].value = 7;
+	sample.events[2].value = 9;
+	strcpy(sample.event_names[0], "instructions");
+	strcpy(sample.event_names[1], "r0010");
+	strcpy(sample.event_names[2], "r0011");
 
 	err = pmi_output_open(&writer, path, 1000000);
 	CHECK(err == 0);

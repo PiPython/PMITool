@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdint.h>
 
-#include "pmi/joiner.h"
+#include "pmi/perf_session.h"
 
 struct pmi_output_writer {
 	FILE *fp;
@@ -15,7 +15,7 @@ struct pmi_output_writer {
 int pmi_output_open(struct pmi_output_writer *writer, const char *path,
 		    uint64_t period_insn);
 int pmi_output_write_sample(struct pmi_output_writer *writer,
-			    const struct pmi_joined_sample *sample,
+			    const struct pmi_perf_sample *sample,
 			    const char *symbol, const char *stack);
 void pmi_output_close(struct pmi_output_writer *writer);
 

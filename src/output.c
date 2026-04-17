@@ -37,7 +37,7 @@ static void sanitize_field(const char *src, char *dst, size_t cap)
 	dst[j] = '\0';
 }
 
-static int format_custom_events(const struct pmi_joined_sample *sample, char *buf,
+static int format_custom_events(const struct pmi_perf_sample *sample, char *buf,
 				size_t cap)
 {
 	size_t i;
@@ -47,17 +47,15 @@ static int format_custom_events(const struct pmi_joined_sample *sample, char *bu
 	if (!buf || cap == 0)
 		return -EINVAL;
 
-	for (i = 0; i < sample->perf.event_count; ++i) {
-		const char *name = sample->perf.event_names[i][0] ?
-					   sample->perf.event_names[i] :
+	for (i = 1; i < sample->event_count; ++i) {
+		const char *name = sample->event_names[i][0] ?
+					   sample->event_names[i] :
 					   "event";
 		int written;
 
-		if (strcmp(name, "instructions") == 0)
-			continue;
 		written = snprintf(buf + len, cap - len, "%s%s=%" PRIu64,
 				   wrote ? "," : "", name,
-				   (uint64_t)sample->perf.events[i].value);
+				   (uint64_t)sample->events[i].value);
 		if (written < 0 || (size_t)written >= cap - len)
 			return -E2BIG;
 		len += (size_t)written;
@@ -74,17 +72,10 @@ static int format_custom_events(const struct pmi_joined_sample *sample, char *bu
 	return 0;
 }
 
-static uint64_t find_instruction_total(const struct pmi_joined_sample *sample)
+static uint64_t find_instruction_total(const struct pmi_perf_sample *sample)
 {
-	size_t i;
-
-	for (i = 0; i < sample->perf.event_count; ++i) {
-		if (strcmp(sample->perf.event_names[i], "instructions") == 0)
-			return sample->perf.events[i].value;
-	}
-
-	if (sample->perf.event_count > 0)
-		return sample->perf.events[0].value;
+	if (sample->event_count > 0)
+		return sample->events[0].value;
 	return 0;
 }
 
@@ -112,7 +103,7 @@ int pmi_output_open(struct pmi_output_writer *writer, const char *path,
 }
 
 int pmi_output_write_sample(struct pmi_output_writer *writer,
-			    const struct pmi_joined_sample *sample,
+			    const struct pmi_perf_sample *sample,
 			    const char *symbol, const char *stack)
 {
 	char safe_symbol[PMI_MAX_SYMBOL_LEN];
@@ -130,9 +121,9 @@ int pmi_output_write_sample(struct pmi_output_writer *writer,
 	if (!writer || !writer->fp || !sample)
 		return -EINVAL;
 
-	ip = sample->bpf.ip ? sample->bpf.ip : sample->perf.ip;
-	pid = sample->perf.pid ? sample->perf.pid : (pid_t)sample->bpf.pid;
-	tid = sample->perf.tid ? sample->perf.tid : (pid_t)sample->bpf.tid;
+	ip = sample->ip;
+	pid = sample->pid;
+	tid = sample->tid;
 	insn_total = find_instruction_total(sample);
 
 	sanitize_field(symbol && symbol[0] ? symbol : "-", safe_symbol,

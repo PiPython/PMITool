@@ -1,70 +1,56 @@
 # PMITool
 
-Linux/arm64 PMI sampler implemented in C with `perf_event_open` and eBPF.
+ Linux/arm64 PMI sampler implemented in C with `perf_event_open`.
 
 ## Scope
 
 - Linux-only collector
 - Instruction-period sampling (`1,000,000` retired instructions by default)
 - Raw sibling PMU events from the CPU core PMU (`-e r0010,r0011`)
-- `perf_event` BPF program for stack/IP enrichment
+- `perf` callchain capture in `--stack full` mode
 - Raw sample recording plus function-level report generation
 
 ## Build prerequisites
 
-The project code directly depends on `libbpf`, but building vendored `libbpf`
-also requires its documented prerequisites:
+The default build is pure `perf_event_open`; `libbpf` is no longer required.
+You only need a C toolchain plus Linux UAPI headers.
 
-- `clang`
-- `llvm-strip`
+- `clang` or `gcc`
 - `make`
-- `pkg-config`
-- `libelf`
-- `zlib`
-
-Option 1: use vendored `libbpf`:
-
-```bash
-./scripts/fetch_libbpf.sh
-make
-```
-
-Option 2: use system `libbpf` instead of vendoring it.
+- kernel headers / `linux-libc-dev`
 
 Debian/Ubuntu:
 
 ```bash
-sudo apt-get install -y clang llvm make pkg-config libbpf-dev libelf-dev zlib1g-dev linux-libc-dev
-make USE_SYSTEM_LIBBPF=1
+sudo apt-get install -y clang make linux-libc-dev
+make
 ```
 
 Fedora/RHEL:
 
 ```bash
-sudo dnf install -y clang llvm make pkgconf-pkg-config libbpf-devel elfutils-libelf-devel zlib-devel kernel-headers
-make USE_SYSTEM_LIBBPF=1
+sudo dnf install -y clang make kernel-headers
+make
 ```
 
 openEuler:
 
 ```bash
-sudo dnf install -y clang llvm make pkgconf-pkg-config libbpf-devel elfutils-libelf-devel zlib-devel kernel-headers
-make USE_SYSTEM_LIBBPF=1
+sudo dnf install -y clang make kernel-headers
+make
 ```
 
 Arch Linux:
 
 ```bash
-sudo pacman -S --needed clang llvm make pkgconf libbpf elfutils zlib linux-headers
-make USE_SYSTEM_LIBBPF=1
+sudo pacman -S --needed clang make linux-headers
+make
 ```
 
 Run unit tests:
 
 ```bash
 make test
-# or, if using the system package:
-make USE_SYSTEM_LIBBPF=1 test
 ```
 
 ## Commands
@@ -113,7 +99,7 @@ S <seq> <insn_total> <insn_expected> <pid> <tid> <ip> <symbol> <events> <stack>
 - `insn_total`: exact cumulative instructions counter from the leader event
 - `insn_expected`: `seq * period_insn`
 - `events`: comma-separated custom raw PMU values such as `r0010=123,r0011=456`
-- `stack`: `-` in `top` mode, or raw user-stack IPs such as `0xaaa;0xbbb;0xccc`
+- `stack`: `-` in `top` mode, or raw perf callchain IPs such as `0xaaa;0xbbb;0xccc`
 
 The file starts with:
 
@@ -130,5 +116,7 @@ The file starts with:
 - `-e` requires a real CPU PMU; virtual environments without one will fail fast
 - `record --pid` snapshots and refreshes thread lists periodically, but does not
   attempt to preserve symbol/mmap history after process exit
-- `--stack full` records raw stack addresses during capture and leaves full-stack
-  symbolization to offline consumers such as `report`
+- `--stack full` uses `PERF_SAMPLE_CALLCHAIN`; user-space unwind quality depends
+  on the target binary keeping frame pointers
+- Raw stack addresses are recorded during capture and left for offline consumers
+  such as `report`

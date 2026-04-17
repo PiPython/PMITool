@@ -6,8 +6,6 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#include <bpf/libbpf.h>
-
 #include "pmi/event.h"
 #include "pmi/record.h"
 #include "pmi/shared.h"
@@ -22,7 +20,9 @@ struct pmi_perf_sample {
 	char comm[PMI_COMM_LEN];
 	struct pmi_event_value events[PMI_MAX_EVENTS];
 	char event_names[PMI_MAX_EVENTS][PMI_MAX_EVENT_NAME];
+	uint64_t callchain[PMI_MAX_STACK_DEPTH];
 	size_t event_count;
+	size_t callchain_count;
 	unsigned int lost_flags;
 };
 
@@ -45,6 +45,7 @@ struct pmi_perf_session {
 	void *mmap_base;
 	size_t mmap_len;
 	uint64_t stream_id;
+	uint64_t sample_type;
 	char comm[PMI_COMM_LEN];
 	bool debug_perf;
 	bool pending_lost;
@@ -57,7 +58,6 @@ struct pmi_perf_session {
 	uint64_t last_time_running;
 	uint64_t missing_periods_reported;
 	bool count_grew;
-	struct bpf_link *link;
 	struct pmi_opened_event events[PMI_MAX_EVENTS];
 	size_t event_count;
 };
