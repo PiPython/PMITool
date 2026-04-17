@@ -505,6 +505,19 @@ static void close_runtime(struct record_runtime *rt)
 				      "stage=close-join-flush err=%d (%s)", -err,
 				      strerror(-err));
 	}
+	for (i = 0; i < rt->session_count; ++i) {
+		if (rt->opts.debug_perf && rt->sessions[i].count_grew &&
+		    rt->sessions[i].samples_seen == 0) {
+			record_debugf(rt, "summary",
+				      "tid=%d count_grew=yes samples_seen=%" PRIu64 " period=%" PRIu64 " last_leader=%" PRIu64 " enabled=%" PRIu64 " running=%" PRIu64,
+				      rt->sessions[i].tid,
+				      rt->sessions[i].samples_seen,
+				      rt->sessions[i].sample_period,
+				      rt->sessions[i].last_leader_count,
+				      rt->sessions[i].last_time_enabled,
+				      rt->sessions[i].last_time_running);
+		}
+	}
 	for (i = 0; i < rt->session_count; ++i)
 		pmi_perf_session_close(&rt->sessions[i]);
 	pmi_joiner_destroy(rt->joiner);

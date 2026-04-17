@@ -26,6 +26,11 @@ struct pmi_perf_sample {
 	unsigned int lost_flags;
 };
 
+struct pmi_perf_group_snapshot {
+	struct pmi_event_value events[PMI_MAX_EVENTS];
+	size_t event_count;
+};
+
 struct pmi_opened_event {
 	char name[PMI_MAX_EVENT_NAME];
 	int fd;
@@ -43,6 +48,15 @@ struct pmi_perf_session {
 	char comm[PMI_COMM_LEN];
 	bool debug_perf;
 	bool pending_lost;
+	uint64_t sample_period;
+	uint64_t empty_drains;
+	uint64_t samples_seen;
+	uint64_t last_leader_count;
+	uint64_t last_sample_leader_count;
+	uint64_t last_time_enabled;
+	uint64_t last_time_running;
+	uint64_t missing_periods_reported;
+	bool count_grew;
 	struct bpf_link *link;
 	struct pmi_opened_event events[PMI_MAX_EVENTS];
 	size_t event_count;
@@ -58,6 +72,8 @@ int pmi_perf_session_drain(struct pmi_perf_session *session, pmi_perf_sample_cb 
 			   void *ctx);
 int pmi_perf_decode_sample(const void *data, size_t len, uint64_t sample_type,
 			   struct pmi_perf_sample *sample);
+int pmi_perf_parse_group_read(const void *data, size_t len,
+			      struct pmi_perf_group_snapshot *snapshot);
 void pmi_perf_session_close(struct pmi_perf_session *session);
 
 #endif

@@ -22,6 +22,7 @@
 #include "pmi/strutil.h"
 
 #define PMI_PERF_BUFFER_PAGES 8
+#define PMI_EMPTY_DRAIN_LOG_INTERVAL 10
 
 static void perf_debugf(const struct pmi_perf_session *session,
 			const char *scope, const char *fmt, ...)
@@ -84,6 +85,12 @@ static int sys_perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu,
 	return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
 }
 
+static bool should_log_empty_drain(uint64_t empty_drains)
+{
+	return empty_drains <= 3 ||
+	       (empty_drains % PMI_EMPTY_DRAIN_LOG_INTERVAL) == 0;
+}
+
 static int copy_from_ring(void *dst, size_t cap, const char *base, size_t size,
 			  uint64_t offset, size_t len)
 {
@@ -97,6 +104,161 @@ static int copy_from_ring(void *dst, size_t cap, const char *base, size_t size,
 	}
 	memcpy(dst, base + begin, size - begin);
 	memcpy((char *)dst + (size - begin), base, len - (size - begin));
+	return 0;
+}
+
+static int parse_group_read_impl(const struct pmi_perf_session *session,
+				 const void *data, size_t len,
+				 struct pmi_perf_group_snapshot *snapshot)
+{
+	const unsigned char *cursor = data;
+	const unsigned char *end = cursor + len;
+	uint64_t nr, time_enabled, time_running;
+	size_t i;
+
+	if (!data || !snapshot)
+		return -EINVAL;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+
+	if ((size_t)(end - cursor) < sizeof(uint64_t)) {
+		perf_debugf(session, "error",
+			    "tid=%d stage=parse-group-read field=nr len=%zu err=EINVAL",
+			    session ? session->tid : -1, len);
+		return -EINVAL;
+	}
+	memcpy(&nr, cursor, sizeof(nr));
+	cursor += sizeof(uint64_t);
+
+	if ((size_t)(end - cursor) < sizeof(uint64_t) * 2) {
+		perf_debugf(session, "error",
+			    "tid=%d stage=parse-group-read field=time len=%zu err=EINVAL",
+			    session ? session->tid : -1, len);
+		return -EINVAL;
+	}
+	memcpy(&time_enabled, cursor, sizeof(time_enabled));
+	memcpy(&time_running, cursor + sizeof(uint64_t), sizeof(time_running));
+	cursor += sizeof(uint64_t) * 2;
+
+	if (nr > PMI_MAX_EVENTS)
+		nr = PMI_MAX_EVENTS;
+	snapshot->event_count = (size_t)nr;
+	for (i = 0; i < snapshot->event_count; ++i) {
+		if ((size_t)(end - cursor) < sizeof(uint64_t) * 2) {
+			perf_debugf(session, "error",
+				    "tid=%d stage=parse-group-read field=value len=%zu slot=%zu err=EINVAL",
+				    session ? session->tid : -1, len, i);
+			return -EINVAL;
+		}
+		memcpy(&snapshot->events[i].value, cursor, sizeof(uint64_t));
+		memcpy(&snapshot->events[i].id, cursor + sizeof(uint64_t),
+		       sizeof(uint64_t));
+		snapshot->events[i].time_enabled = time_enabled;
+		snapshot->events[i].time_running = time_running;
+		cursor += sizeof(uint64_t) * 2;
+	}
+
+	return 0;
+}
+
+int pmi_perf_parse_group_read(const void *data, size_t len,
+			      struct pmi_perf_group_snapshot *snapshot)
+{
+	return parse_group_read_impl(NULL, data, len, snapshot);
+}
+
+static int read_group_snapshot(const struct pmi_perf_session *session,
+			       struct pmi_perf_group_snapshot *snapshot)
+{
+	uint64_t raw[(3 + PMI_MAX_EVENTS * 2)] = { 0 };
+	size_t need;
+	ssize_t got;
+
+	if (!session || !snapshot || session->leader_fd < 0)
+		return -EINVAL;
+
+	need = (3 + session->event_count * 2) * sizeof(uint64_t);
+	got = read(session->leader_fd, raw, need);
+	if (got < 0) {
+		perf_debugf(session, "error",
+			    "tid=%d stage=read-count fd=%d errno=%d (%s)",
+			    session->tid, session->leader_fd, errno, strerror(errno));
+		return -errno;
+	}
+	if ((size_t)got != need) {
+		perf_debugf(session, "error",
+			    "tid=%d stage=read-count fd=%d short_read=%zd expected=%zu",
+			    session->tid, session->leader_fd, got, need);
+		return -EIO;
+	}
+
+	return parse_group_read_impl(session, raw, (size_t)got, snapshot);
+}
+
+static int debug_empty_drain_snapshot(struct pmi_perf_session *session)
+{
+	struct pmi_perf_group_snapshot snapshot;
+	uint64_t leader_count = 0;
+	uint64_t leader_delta = 0;
+	uint64_t count_without_sample = 0;
+	uint64_t enabled = 0;
+	uint64_t running = 0;
+	uint64_t missing_periods = 0;
+	size_t i;
+	int err;
+
+	if (!session || !session->debug_perf)
+		return 0;
+
+	err = read_group_snapshot(session, &snapshot);
+	if (err)
+		return err;
+
+	if (snapshot.event_count > 0) {
+		leader_count = snapshot.events[0].value;
+		enabled = snapshot.events[0].time_enabled;
+		running = snapshot.events[0].time_running;
+	}
+
+	if (leader_count > session->last_leader_count)
+		leader_delta = leader_count - session->last_leader_count;
+	if (leader_delta > 0)
+		session->count_grew = true;
+	session->last_leader_count = leader_count;
+	session->last_time_enabled = enabled;
+	session->last_time_running = running;
+
+	if (leader_count > session->last_sample_leader_count)
+		count_without_sample = leader_count - session->last_sample_leader_count;
+
+	if (should_log_empty_drain(session->empty_drains)) {
+		perf_debugf(session, "count",
+			    "tid=%d empty_drains=%" PRIu64 " nr=%zu leader=%" PRIu64 " delta=%" PRIu64 " enabled=%" PRIu64 " running=%" PRIu64,
+			    session->tid, session->empty_drains, snapshot.event_count,
+			    leader_count, leader_delta, enabled, running);
+		for (i = 0; i < snapshot.event_count; ++i) {
+			perf_debugf(session, "count",
+				    "tid=%d slot=%zu expected_name=%s expected_id=%" PRIu64 " sample_id=%" PRIu64 " value=%" PRIu64 " enabled=%" PRIu64 " running=%" PRIu64,
+				    session->tid, i,
+				    i < session->event_count ? session->events[i].name : "event",
+				    i < session->event_count ? (uint64_t)session->events[i].id : 0,
+				    (uint64_t)snapshot.events[i].id,
+				    (uint64_t)snapshot.events[i].value,
+				    (uint64_t)snapshot.events[i].time_enabled,
+				    (uint64_t)snapshot.events[i].time_running);
+		}
+	}
+
+	if (session->sample_period > 0)
+		missing_periods = count_without_sample / session->sample_period;
+	if (missing_periods > session->missing_periods_reported) {
+		perf_debugf(session, "anomaly",
+			    "tid=%d count_without_sample=%" PRIu64 " period=%" PRIu64 " leader_delta=%" PRIu64 " enabled=%" PRIu64 " running=%" PRIu64,
+			    session->tid, count_without_sample, session->sample_period,
+			    leader_delta, enabled, running);
+		session->missing_periods_reported = missing_periods;
+	}
+
 	return 0;
 }
 
@@ -340,6 +502,7 @@ int pmi_perf_session_open(struct pmi_perf_session *session, pid_t tid,
 	memset(session, 0, sizeof(*session));
 	session->tid = tid;
 	session->debug_perf = opts->debug_perf;
+	session->sample_period = leader.sample_period;
 	for (i = 0; i < PMI_MAX_EVENTS; ++i)
 		session->events[i].fd = -1;
 
@@ -353,10 +516,13 @@ int pmi_perf_session_open(struct pmi_perf_session *session, pid_t tid,
 	session->leader_fd = session->events[0].fd;
 	session->event_count = 1;
 	perf_debugf(session, "open",
-		    "tid=%d opened slot=0 name=%s fd=%d id=%" PRIu64 " type=%u config=0x%" PRIx64,
+		    "tid=%d opened slot=0 name=%s fd=%d id=%" PRIu64 " type=%u config=0x%" PRIx64 " sample_period=%" PRIu64 " sample_type=0x%" PRIx64 " read_format=0x%" PRIx64 " exclude_kernel=%u disabled=%u wakeup_events=%u",
 		    tid, session->events[0].name, session->events[0].fd,
 		    (uint64_t)session->events[0].id, session->events[0].type,
-		    (uint64_t)session->events[0].config);
+		    (uint64_t)session->events[0].config,
+		    (uint64_t)leader.sample_period, (uint64_t)leader.sample_type,
+		    (uint64_t)leader.read_format, leader.exclude_kernel,
+		    leader.disabled, leader.wakeup_events);
 
 	for (i = 0; i < events->count; ++i) {
 		struct perf_event_attr sibling = {
@@ -462,6 +628,14 @@ int pmi_perf_session_drain(struct pmi_perf_session *session, pmi_perf_sample_cb 
 	size = meta->data_size;
 	head = __atomic_load_n(&meta->data_head, __ATOMIC_ACQUIRE);
 	tail = meta->data_tail;
+	if (head == tail) {
+		session->empty_drains++;
+		err = debug_empty_drain_snapshot(session);
+		if (err)
+			return err;
+		return 0;
+	}
+	session->empty_drains = 0;
 	perf_debugf(session, "drain",
 		    "tid=%d head=%" PRIu64 " tail=%" PRIu64 " size=%" PRIu64,
 		    session->tid, head, tail, size);
@@ -522,10 +696,18 @@ int pmi_perf_session_drain(struct pmi_perf_session *session, pmi_perf_sample_cb 
 					    session->comm);
 			sample.lost_flags = session->pending_lost ? PMI_LOST_PERF : 0;
 			session->pending_lost = false;
+			session->samples_seen++;
 			perf_debugf(session, "decode",
 				    "tid=%d sample pid=%d tid=%d cpu=%u stream=%" PRIu64 " ip=0x%" PRIx64 " event_count=%zu",
 				    session->tid, sample.pid, sample.tid, sample.cpu,
 				    sample.stream_id, sample.ip, sample.event_count);
+			if (sample.event_count > 0) {
+				session->last_leader_count = sample.events[0].value;
+				session->last_sample_leader_count = sample.events[0].value;
+				session->last_time_enabled = sample.events[0].time_enabled;
+				session->last_time_running = sample.events[0].time_running;
+				session->missing_periods_reported = 0;
+			}
 			fill_sample_names(session, &sample);
 			err = cb(&sample, ctx);
 			if (err) {

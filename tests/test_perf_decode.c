@@ -21,6 +21,7 @@ int main(void)
 	unsigned char payload[256];
 	unsigned char *cursor = payload;
 	struct pmi_perf_sample sample;
+	struct pmi_perf_group_snapshot snapshot;
 	const uint64_t sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID |
 				     PERF_SAMPLE_TIME | PERF_SAMPLE_CPU |
 				     PERF_SAMPLE_READ | PERF_SAMPLE_STREAM_ID;
@@ -72,6 +73,32 @@ int main(void)
 	CHECK(sample.events[0].time_running == running);
 	CHECK(sample.events[1].id == id1);
 	CHECK(sample.events[1].value == value1);
+
+	cursor = payload;
+	memcpy(cursor, &nr, sizeof(nr));
+	cursor += sizeof(nr);
+	memcpy(cursor, &enabled, sizeof(enabled));
+	memcpy(cursor + sizeof(enabled), &running, sizeof(running));
+	cursor += sizeof(enabled) + sizeof(running);
+	memcpy(cursor, &value0, sizeof(value0));
+	memcpy(cursor + sizeof(value0), &id0, sizeof(id0));
+	cursor += sizeof(value0) + sizeof(id0);
+	memcpy(cursor, &value1, sizeof(value1));
+	memcpy(cursor + sizeof(value1), &id1, sizeof(id1));
+	cursor += sizeof(value1) + sizeof(id1);
+
+	err = pmi_perf_parse_group_read(payload, (size_t)(cursor - payload),
+					&snapshot);
+	CHECK(err == 0);
+	CHECK(snapshot.event_count == 2);
+	CHECK(snapshot.events[0].id == id0);
+	CHECK(snapshot.events[0].value == value0);
+	CHECK(snapshot.events[0].time_enabled == enabled);
+	CHECK(snapshot.events[0].time_running == running);
+	CHECK(snapshot.events[1].id == id1);
+	CHECK(snapshot.events[1].value == value1);
+	CHECK(snapshot.events[1].time_enabled == enabled);
+	CHECK(snapshot.events[1].time_running == running);
 
 	return 0;
 }
