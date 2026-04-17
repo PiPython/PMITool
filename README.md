@@ -64,13 +64,13 @@ sudo ./build/pmi record -p 1234 -o samples.pmi
 Launch and record:
 
 ```bash
-sudo ./build/pmi record -c 'taskset -c 0 ./bench' -s full -o samples.pmi
+sudo ./build/pmi record -c 'taskset -c 0 ./bench' -s top -o samples.pmi
 ```
 
-Launch and record with raw PMU events plus a shorter sampling period:
+Launch and record with raw PMU events plus a shorter sampling period and full stack:
 
 ```bash
-sudo ./build/pmi record -c './bench' -n 100000 -e r0010,r0011 -o samples.pmi
+sudo ./build/pmi record -c './bench' -n 100000 -e r0010,r0011 -s full -o samples.pmi
 ```
 
 Report:
@@ -78,6 +78,9 @@ Report:
 ```bash
 ./build/pmi report -i samples.pmi -l 20
 ```
+
+`report` prints a hotspot table by `top` function and, when `-s full` samples
+exist, a second `full stacks` section with symbolized folded stacks.
 
 Help:
 
@@ -92,22 +95,24 @@ Help:
 `record` writes tab-separated text records:
 
 ```text
-S <seq> <insn_total> <insn_expected> <pid> <tid> <ip> <symbol> <events> <stack>
+S <seq> <insn_total> <insn_expected> <pid> <tid> <top> <events> <stack>
 ```
 
 - `seq`: sample sequence number starting from 1
 - `insn_total`: exact cumulative instructions counter from the leader event
 - `insn_expected`: `seq * period_insn`
+- `top`: leaf function name; `-` when `-s` is omitted
 - `events`: comma-separated custom raw PMU values such as `r0010=123,r0011=456`
-- `stack`: `-` in `top` mode, or raw perf callchain IPs such as `0xaaa;0xbbb;0xccc`
+- `stack`: `-` when `-s` is omitted or `-s top`; with `-s full` it stores the
+  remaining raw callchain IPs after the leaf frame, such as `0xaaa;0xbbb`
 
 The file starts with:
 
 ```text
-# pmi raw v2
+# pmi raw v3
 ```
 
-`report` reads only this v2 format.
+`report` reads only this v3 format.
 
 ## Current limits
 
@@ -116,6 +121,7 @@ The file starts with:
 - `-e` requires a real CPU PMU; virtual environments without one will fail fast
 - `record --pid` snapshots and refreshes thread lists periodically, but does not
   attempt to preserve symbol/mmap history after process exit
+- Omitting `-s` disables function and stack output entirely
 - `--stack full` uses `PERF_SAMPLE_CALLCHAIN`; user-space unwind quality depends
   on the target binary keeping frame pointers
 - Raw stack addresses are recorded during capture and left for offline consumers

@@ -16,7 +16,7 @@ int pmi_output_open(struct pmi_output_writer *writer, const char *path,
 		    uint64_t period_insn);
 int pmi_output_write_sample(struct pmi_output_writer *writer,
 			    const struct pmi_perf_sample *sample,
-			    const char *symbol, const char *stack);
+			    const char *top, const char *stack);
 void pmi_output_close(struct pmi_output_writer *writer);
 
 #endif

@@ -11,8 +11,8 @@ static void usage(FILE *stream)
 		"  pmi report [options]\n"
 		"\n"
 		"subcommands:\n"
-		"  record    record PMI samples into a raw v2 file\n"
-		"  report    aggregate a raw v2 file into function hotspots\n"
+		"  record    record PMI samples into a raw v3 file\n"
+		"  report    aggregate a raw v3 file into function hotspots\n"
 		"\n"
 		"run 'pmi record -h' or 'pmi report -h' for subcommand help.\n");
 }

@@ -33,7 +33,7 @@ static char *next_field(char **cursor)
 
 int main(void)
 {
-	char path[] = "/tmp/pmi-output-v2-XXXXXX";
+	char path[] = "/tmp/pmi-output-v3-XXXXXX";
 	struct pmi_output_writer writer;
 	struct pmi_perf_sample sample;
 	FILE *fp;
@@ -62,15 +62,14 @@ int main(void)
 
 	err = pmi_output_open(&writer, path, 1000000);
 	CHECK(err == 0);
-	err = pmi_output_write_sample(&writer, &sample, "hot_func",
-				      "0x1234;0x2345");
+	err = pmi_output_write_sample(&writer, &sample, "hot_func", "0x2345");
 	CHECK(err == 0);
 	pmi_output_close(&writer);
 
 	fp = fopen(path, "r");
 	CHECK(fp != NULL);
 	CHECK(fgets(header, sizeof(header), fp) != NULL);
-	CHECK(strcmp(header, "# pmi raw v2\n") == 0);
+	CHECK(strcmp(header, "# pmi raw v3\n") == 0);
 	CHECK(fgets(columns, sizeof(columns), fp) != NULL);
 	cursor = columns;
 	CHECK(strcmp(next_field(&cursor), "type") == 0);
@@ -79,8 +78,7 @@ int main(void)
 	CHECK(strcmp(next_field(&cursor), "insn_expected") == 0);
 	CHECK(strcmp(next_field(&cursor), "pid") == 0);
 	CHECK(strcmp(next_field(&cursor), "tid") == 0);
-	CHECK(strcmp(next_field(&cursor), "ip") == 0);
-	CHECK(strcmp(next_field(&cursor), "symbol") == 0);
+	CHECK(strcmp(next_field(&cursor), "top") == 0);
 	CHECK(strcmp(next_field(&cursor), "events") == 0);
 	CHECK(strcmp(next_field(&cursor), "stack") == 0);
 	CHECK(fgets(line, sizeof(line), fp) != NULL);
@@ -91,10 +89,9 @@ int main(void)
 	CHECK(strcmp(next_field(&cursor), "1000000") == 0);
 	CHECK(strcmp(next_field(&cursor), "11") == 0);
 	CHECK(strcmp(next_field(&cursor), "22") == 0);
-	CHECK(strcmp(next_field(&cursor), "0x1234") == 0);
 	CHECK(strcmp(next_field(&cursor), "hot_func") == 0);
 	CHECK(strcmp(next_field(&cursor), "r0010=7,r0011=9") == 0);
-	CHECK(strcmp(next_field(&cursor), "0x1234;0x2345") == 0);
+	CHECK(strcmp(next_field(&cursor), "0x2345") == 0);
 	fclose(fp);
 	unlink(path);
 	return 0;

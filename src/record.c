@@ -48,12 +48,12 @@ static void record_usage(FILE *stream)
 		"  -p, --pid <pid>            attach to all threads in a process\n"
 		"  -t, --tid <tid>            attach to one thread\n"
 		"  -c, --cmd <cmd>            spawn and record a shell command\n"
-		"  -o, --out <file>           write raw v2 samples to a file\n"
+		"  -o, --out <file>           write raw v3 samples to a file\n"
 		"  -n, --period-insn <count>  sampling period in retired instructions\n"
 		"                             default: 1000000\n"
 		"  -e <raw-list>              raw PMU events, e.g. -e r0010,r0011\n"
 		"                             may be repeated; only CPU PMU raw events are supported\n"
-		"  -s, --stack <top|full>     stack mode; default: top\n"
+		"  -s, --stack <top|full>     function/stack mode; default: off\n"
 		"  -k, --kernel-stack <on|off>\n"
 		"                             include kernel samples and kernel callchain, default: off\n"
 		"      --debug-perf           print perf_session debug logs to stderr\n"
@@ -108,8 +108,8 @@ static void normalize_symbol(char *symbol)
 		*plus = '\0';
 }
 
-static void format_stack_ips(const uint64_t *ips, size_t depth, char *out,
-			     size_t out_cap)
+static void format_stack_ips(const uint64_t *ips, size_t begin, size_t depth,
+			     char *out, size_t out_cap)
 {
 	size_t i;
 	size_t len = 0;
@@ -119,7 +119,7 @@ static void format_stack_ips(const uint64_t *ips, size_t depth, char *out,
 		return;
 
 	out[0] = '\0';
-	for (i = 0; i < depth; ++i) {
+	for (i = begin; i < depth; ++i) {
 		int written;
 
 		if (ips[i] == 0)
@@ -140,27 +140,37 @@ static int on_perf_sample(const struct pmi_perf_sample *sample, void *ctx)
 {
 	struct record_runtime *rt = ctx;
 	char module[PMI_MAX_MODULE_LEN];
-	char symbol[PMI_MAX_SYMBOL_LEN];
+	char top[PMI_MAX_SYMBOL_LEN];
 	char stack[PMI_MAX_STACK_TEXT_LEN];
+	uint64_t top_ip = 0;
 
 	if (!sample)
 		return 0;
 
-	pmi_copy_cstr_trunc(symbol, sizeof(symbol), sample->ip ? "-" : "0x0");
+	pmi_copy_cstr_trunc(top, sizeof(top), "-");
 	pmi_copy_cstr_trunc(stack, sizeof(stack), "-");
 
-	if (sample->ip) {
-		pmi_symbolizer_symbolize_ip(rt->symbolizer, sample->pid, sample->ip, module,
-					    sizeof(module), symbol,
-					    sizeof(symbol));
-		normalize_symbol(symbol);
+	if (rt->opts.stack_mode == PMI_STACK_TOP) {
+		top_ip = sample->ip;
+	} else if (rt->opts.stack_mode == PMI_STACK_FULL) {
+		if (sample->callchain_count > 0)
+			top_ip = sample->callchain[0];
+		else
+			top_ip = sample->ip;
 	}
 
-	if (rt->opts.stack_mode == PMI_STACK_FULL && sample->callchain_count > 0)
-		format_stack_ips(sample->callchain, sample->callchain_count, stack,
+	if (top_ip != 0) {
+		pmi_copy_cstr_trunc(top, sizeof(top), "0x0");
+		pmi_symbolizer_symbolize_ip(rt->symbolizer, sample->pid, top_ip, module,
+					    sizeof(module), top, sizeof(top));
+		normalize_symbol(top);
+	}
+
+	if (rt->opts.stack_mode == PMI_STACK_FULL && sample->callchain_count > 1)
+		format_stack_ips(sample->callchain, 1, sample->callchain_count, stack,
 				 sizeof(stack));
 
-	return pmi_output_write_sample(&rt->writer, sample, symbol, stack);
+	return pmi_output_write_sample(&rt->writer, sample, top, stack);
 }
 
 static int attach_tid(struct record_runtime *rt, pid_t tid)
@@ -326,7 +336,7 @@ static int parse_record_options(int argc, char **argv, struct pmi_record_options
 
 	memset(opts, 0, sizeof(*opts));
 	opts->period = 1000000;
-	opts->stack_mode = PMI_STACK_TOP;
+	opts->stack_mode = PMI_STACK_NONE;
 	opts->mmap_pages = 8;
 	opts->poll_timeout_ms = 200;
 	opterr = 0;
