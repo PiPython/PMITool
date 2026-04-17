@@ -26,6 +26,10 @@ struct pmi_record_options {
 struct pmi_report_options {
 	const char *input_path;
 	size_t limit;
+	enum {
+		PMI_REPORT_OVERVIEW = 0,
+		PMI_REPORT_SAMPLES = 1,
+	} mode;
 };
 
 int pmi_record_main(int argc, char **argv);

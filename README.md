@@ -79,8 +79,15 @@ Report:
 ./build/pmi report -i samples.pmi -l 20
 ```
 
-`report` prints a hotspot table by `top` function and, when `-s full` samples
-exist, a second `full stacks` section with symbolized folded stacks.
+Per-sample report:
+
+```bash
+./build/pmi report -i samples.pmi -m samples
+```
+
+`report` defaults to an overview table by `top` function and, when `-s full`
+samples exist, a second `full stacks` section with symbolized folded stacks.
+`-m samples` instead prints every sample in file order.
 
 Help:
 
@@ -95,16 +102,17 @@ Help:
 `record` writes tab-separated text records:
 
 ```text
-S <seq> <insn_total> <insn_expected> <pid> <tid> <top> <events> <stack>
+S <seq> <insn_delta> <pid> <tid> <events> <top> <stack>
 ```
 
 - `seq`: sample sequence number starting from 1
-- `insn_total`: exact cumulative instructions counter from the leader event
-- `insn_expected`: `seq * period_insn`
+- `insn_delta`: instructions retired since the previous sample of the same `tid`
 - `top`: leaf function name; `-` when `-s` is omitted
-- `events`: comma-separated custom raw PMU values such as `r0010=123,r0011=456`
+- `events`: comma-separated raw PMU deltas such as `r0010=123,r0011=456`
 - `stack`: `-` when `-s` is omitted or `-s top`; with `-s full` it stores the
   remaining raw callchain IPs after the leaf frame, such as `0xaaa;0xbbb`
+
+For each `tid`, the first sample writes the current counter values as its delta.
 
 The file starts with:
 

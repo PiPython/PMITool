@@ -19,6 +19,7 @@ struct event_sum {
 struct report_entry {
 	char top[PMI_MAX_SYMBOL_LEN];
 	size_t sample_count;
+	uint64_t insn_delta_total;
 	struct event_sum events[PMI_MAX_EVENTS];
 	size_t event_count;
 };
@@ -26,14 +27,18 @@ struct report_entry {
 struct stack_entry {
 	char stack[PMI_MAX_STACK_TEXT_LEN];
 	size_t sample_count;
+	uint64_t insn_delta_total;
 	struct event_sum events[PMI_MAX_EVENTS];
 	size_t event_count;
 };
 
 struct parsed_sample {
+	uint64_t seq;
+	uint64_t insn_delta;
 	pid_t pid;
-	char top[PMI_MAX_SYMBOL_LEN];
+	pid_t tid;
 	char events[PMI_MAX_FOLDED_LEN];
+	char top[PMI_MAX_SYMBOL_LEN];
 	char stack[PMI_MAX_STACK_TEXT_LEN];
 };
 
@@ -43,12 +48,15 @@ static void report_usage(FILE *stream)
 		"usage: pmi report -i <file> [options]\n"
 		"\n"
 		"options:\n"
-		"  -i, --input <file>   raw v3 sample file\n"
-		"  -l, --limit <N>      max hotspot rows, default: 20\n"
-		"  -h, --help           show this help\n"
+		"  -i, --input <file>           raw v3 sample file\n"
+		"  -l, --limit <N>              max rows, default: 20\n"
+		"  -m, --mode <overview|samples>\n"
+		"                               default: overview\n"
+		"  -h, --help                   show this help\n"
 		"\n"
-		"example:\n"
-		"  pmi report -i out.pmi -l 20\n");
+		"examples:\n"
+		"  pmi report -i out.pmi\n"
+		"  pmi report -i out.pmi -m samples\n");
 }
 
 static void normalize_symbol(char *symbol)
@@ -127,6 +135,32 @@ static void parse_event_blob(struct event_sum *events, size_t *count, char *blob
 		*eq = '\0';
 		value = strtoull(eq + 1, NULL, 10);
 		add_event_sum(events, count, token, value);
+	}
+}
+
+static void format_event_sums(const struct event_sum *events, size_t count, char *out,
+			      size_t out_cap)
+{
+	size_t i;
+	size_t len = 0;
+
+	if (!out || out_cap == 0)
+		return;
+
+	out[0] = '\0';
+	if (count == 0) {
+		pmi_copy_cstr_trunc(out, out_cap, "-");
+		return;
+	}
+
+	for (i = 0; i < count; ++i) {
+		int written;
+
+		written = snprintf(out + len, out_cap - len, "%s%s=%" PRIu64,
+				   i ? ", " : "", events[i].name, events[i].total);
+		if (written < 0 || (size_t)written >= out_cap - len)
+			break;
+		len += (size_t)written;
 	}
 }
 
@@ -248,7 +282,6 @@ static int build_symbolized_stack(struct pmi_symbolizer *symbolizer, pid_t pid,
 	char stack_copy[PMI_MAX_STACK_TEXT_LEN];
 	char *token;
 	char *saveptr = NULL;
-	bool first_frame = true;
 
 	if (!out || out_cap == 0)
 		return -EINVAL;
@@ -271,13 +304,8 @@ static int build_symbolized_stack(struct pmi_symbolizer *symbolizer, pid_t pid,
 		if (ip == 0)
 			continue;
 		resolve_symbol_or_hex(symbolizer, pid, ip, symbol, sizeof(symbol));
-		if (first_frame && has_symbol_text(top) && strcmp(symbol, top) == 0) {
-			first_frame = false;
-			continue;
-		}
 		if (append_stack_symbol(out, out_cap, symbol) != 0)
 			break;
-		first_frame = false;
 	}
 
 	return 0;
@@ -288,6 +316,7 @@ static int parse_report_options(int argc, char **argv, struct pmi_report_options
 	static const struct option long_options[] = {
 		{ "input", required_argument, NULL, 'i' },
 		{ "limit", required_argument, NULL, 'l' },
+		{ "mode", required_argument, NULL, 'm' },
 		{ "help", no_argument, NULL, 'h' },
 		{ 0, 0, 0, 0 },
 	};
@@ -295,16 +324,27 @@ static int parse_report_options(int argc, char **argv, struct pmi_report_options
 
 	memset(opts, 0, sizeof(*opts));
 	opts->limit = 20;
+	opts->mode = PMI_REPORT_OVERVIEW;
 	opterr = 0;
 	optind = 1;
 
-	while ((opt = getopt_long(argc, argv, "i:l:h", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "i:l:m:h", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'i':
 			opts->input_path = optarg;
 			break;
 		case 'l':
 			opts->limit = strtoul(optarg, NULL, 10);
+			break;
+		case 'm':
+			if (strcmp(optarg, "overview") == 0)
+				opts->mode = PMI_REPORT_OVERVIEW;
+			else if (strcmp(optarg, "samples") == 0)
+				opts->mode = PMI_REPORT_SAMPLES;
+			else {
+				fprintf(stderr, "invalid report mode: %s\n", optarg);
+				return -EINVAL;
+			}
 			break;
 		case 'h':
 			report_usage(stdout);
@@ -336,7 +376,7 @@ static int parse_sample_line(char *line, struct parsed_sample *sample)
 {
 	char *cursor = line;
 	char *field;
-	char *fields[9] = { 0 };
+	char *fields[8] = { 0 };
 	size_t field_count = 0;
 
 	if (!line || !sample)
@@ -344,11 +384,11 @@ static int parse_sample_line(char *line, struct parsed_sample *sample)
 	if (line[0] == '#')
 		return 1;
 
-	while ((field = strsep(&cursor, "\t")) != NULL && field_count < 9) {
+	while ((field = strsep(&cursor, "\t")) != NULL && field_count < 8) {
 		field[strcspn(field, "\r\n")] = '\0';
 		fields[field_count++] = trim_field(field);
 	}
-	if (field_count != 9)
+	if (field_count != 8)
 		return 1;
 	if (strcmp(fields[0], "type") == 0)
 		return 1;
@@ -356,18 +396,54 @@ static int parse_sample_line(char *line, struct parsed_sample *sample)
 		return 1;
 
 	memset(sample, 0, sizeof(*sample));
-	sample->pid = (pid_t)strtol(fields[4], NULL, 10);
+	sample->seq = strtoull(fields[1], NULL, 10);
+	sample->insn_delta = strtoull(fields[2], NULL, 10);
+	sample->pid = (pid_t)strtol(fields[3], NULL, 10);
+	sample->tid = (pid_t)strtol(fields[4], NULL, 10);
+	pmi_copy_cstr_trunc(sample->events, sizeof(sample->events), fields[5]);
 	pmi_copy_cstr_trunc(sample->top, sizeof(sample->top), fields[6]);
-	pmi_copy_cstr_trunc(sample->events, sizeof(sample->events), fields[7]);
-	pmi_copy_cstr_trunc(sample->stack, sizeof(sample->stack), fields[8]);
+	pmi_copy_cstr_trunc(sample->stack, sizeof(sample->stack), fields[7]);
 	normalize_symbol(sample->top);
 	return 0;
 }
 
-int pmi_report_main(int argc, char **argv)
+static int run_samples_report(FILE *fp, struct pmi_symbolizer *symbolizer)
 {
-	struct pmi_report_options opts;
-	struct pmi_symbolizer *symbolizer = NULL;
+	char line[PMI_MAX_LINE_LEN];
+
+	printf("%-8s %-8s %-8s %-16s %-24s %-32s %s\n", "seq", "pid", "tid",
+	       "insn_delta", "events", "top", "stack");
+
+	while (fgets(line, sizeof(line), fp)) {
+		struct parsed_sample sample;
+		char symbolized_stack[PMI_MAX_STACK_TEXT_LEN];
+		int err;
+
+		err = parse_sample_line(line, &sample);
+		if (err == 1)
+			continue;
+		if (err != 0)
+			return err;
+
+		if (strcmp(sample.stack, "-") == 0) {
+			pmi_copy_cstr_trunc(symbolized_stack, sizeof(symbolized_stack), "-");
+		} else {
+			build_symbolized_stack(symbolizer, sample.pid, sample.top,
+					       sample.stack, symbolized_stack,
+					       sizeof(symbolized_stack));
+		}
+
+		printf("%-8" PRIu64 " %-8d %-8d %-16" PRIu64 " %-24s %-32s %s\n",
+		       sample.seq, sample.pid, sample.tid, sample.insn_delta,
+		       sample.events, sample.top, symbolized_stack);
+	}
+
+	return 0;
+}
+
+static int run_overview_report(FILE *fp, struct pmi_symbolizer *symbolizer,
+			       const struct pmi_report_options *opts)
+{
 	struct report_entry *entries = NULL;
 	struct stack_entry *stack_entries = NULL;
 	size_t count = 0;
@@ -375,8 +451,96 @@ int pmi_report_main(int argc, char **argv)
 	size_t stack_count = 0;
 	size_t stack_cap = 0;
 	size_t i;
-	FILE *fp;
 	char line[PMI_MAX_LINE_LEN];
+	int err = 0;
+
+	while (fgets(line, sizeof(line), fp)) {
+		struct parsed_sample sample;
+		struct report_entry *entry;
+		char event_copy[PMI_MAX_FOLDED_LEN];
+
+		err = parse_sample_line(line, &sample);
+		if (err == 1)
+			continue;
+		if (err != 0)
+			goto out;
+
+		entry = find_or_add_report_entry(&entries, &count, &cap, sample.top);
+		if (!entry) {
+			err = -ENOMEM;
+			goto out;
+		}
+		entry->sample_count++;
+		entry->insn_delta_total += sample.insn_delta;
+		pmi_copy_cstr_trunc(event_copy, sizeof(event_copy), sample.events);
+		parse_event_blob(entry->events, &entry->event_count, event_copy);
+
+		if (strcmp(sample.stack, "-") != 0) {
+			struct stack_entry *stack_entry;
+			char folded_stack[PMI_MAX_STACK_TEXT_LEN];
+
+			build_symbolized_stack(symbolizer, sample.pid, sample.top,
+					       sample.stack, folded_stack,
+					       sizeof(folded_stack));
+			if (folded_stack[0] == '\0')
+				continue;
+			stack_entry = find_or_add_stack_entry(&stack_entries, &stack_count,
+						       &stack_cap, folded_stack);
+			if (!stack_entry) {
+				err = -ENOMEM;
+				goto out;
+			}
+			stack_entry->sample_count++;
+			stack_entry->insn_delta_total += sample.insn_delta;
+			pmi_copy_cstr_trunc(event_copy, sizeof(event_copy), sample.events);
+			parse_event_blob(stack_entry->events, &stack_entry->event_count,
+					 event_copy);
+		}
+	}
+
+	qsort(entries, count, sizeof(*entries), compare_report_entry);
+	qsort(stack_entries, stack_count, sizeof(*stack_entries),
+	      compare_stack_entry);
+
+	printf("%-8s %-16s %-32s %s\n", "samples", "insn_delta", "top", "events");
+	for (i = 0; i < count && i < opts->limit; ++i) {
+		char event_text[PMI_MAX_FOLDED_LEN];
+
+		format_event_sums(entries[i].events, entries[i].event_count, event_text,
+				  sizeof(event_text));
+		printf("%-8zu %-16" PRIu64 " %-32s %s\n", entries[i].sample_count,
+		       entries[i].insn_delta_total, entries[i].top, event_text);
+	}
+
+	if (stack_count > 0) {
+		printf("\nfull stacks\n");
+		printf("%-8s %-16s %-60s %s\n", "samples", "insn_delta", "stack",
+		       "events");
+		for (i = 0; i < stack_count && i < opts->limit; ++i) {
+			char event_text[PMI_MAX_FOLDED_LEN];
+
+			format_event_sums(stack_entries[i].events,
+					  stack_entries[i].event_count, event_text,
+					  sizeof(event_text));
+			printf("%-8zu %-16" PRIu64 " %-60s %s\n",
+			       stack_entries[i].sample_count,
+			       stack_entries[i].insn_delta_total,
+			       stack_entries[i].stack, event_text);
+		}
+	}
+
+out:
+	free(entries);
+	free(stack_entries);
+	return err;
+}
+
+int pmi_report_main(int argc, char **argv)
+{
+	struct pmi_report_options opts;
+	struct pmi_symbolizer *symbolizer = NULL;
+	FILE *fp;
+	char magic[64];
 	int err;
 
 	err = parse_report_options(argc, argv, &opts);
@@ -400,107 +564,24 @@ int pmi_report_main(int argc, char **argv)
 		pmi_symbolizer_destroy(symbolizer);
 		return 1;
 	}
-
-	while (fgets(line, sizeof(line), fp)) {
-		struct parsed_sample sample;
-		struct report_entry *entry;
-		char event_copy[PMI_MAX_FOLDED_LEN];
-
-		err = parse_sample_line(line, &sample);
-		if (err == 1)
-			continue;
-		if (err != 0) {
-			fclose(fp);
-			pmi_symbolizer_destroy(symbolizer);
-			free(entries);
-			free(stack_entries);
-			return 1;
-		}
-
-		entry = find_or_add_report_entry(&entries, &count, &cap, sample.top);
-		if (!entry) {
-			fclose(fp);
-			pmi_symbolizer_destroy(symbolizer);
-			free(entries);
-			free(stack_entries);
-			return 1;
-		}
-		entry->sample_count++;
-		pmi_copy_cstr_trunc(event_copy, sizeof(event_copy), sample.events);
-		parse_event_blob(entry->events, &entry->event_count, event_copy);
-
-		if (strcmp(sample.stack, "-") != 0) {
-			struct stack_entry *stack_entry;
-			char folded_stack[PMI_MAX_STACK_TEXT_LEN];
-
-			build_symbolized_stack(symbolizer, sample.pid, sample.top,
-					       sample.stack, folded_stack,
-					       sizeof(folded_stack));
-			if (folded_stack[0] == '\0')
-				continue;
-			stack_entry = find_or_add_stack_entry(&stack_entries, &stack_count,
-						       &stack_cap, folded_stack);
-			if (!stack_entry) {
-				fclose(fp);
-				pmi_symbolizer_destroy(symbolizer);
-				free(entries);
-				free(stack_entries);
-				return 1;
-			}
-			stack_entry->sample_count++;
-			pmi_copy_cstr_trunc(event_copy, sizeof(event_copy), sample.events);
-			parse_event_blob(stack_entry->events, &stack_entry->event_count,
-					 event_copy);
-		}
+	if (!fgets(magic, sizeof(magic), fp) ||
+	    strcmp(magic, "# pmi raw v3\n") != 0) {
+		fprintf(stderr, "%s is not a pmi raw v3 file\n", opts.input_path);
+		fclose(fp);
+		pmi_symbolizer_destroy(symbolizer);
+		return 1;
 	}
+
+	if (opts.mode == PMI_REPORT_SAMPLES)
+		err = run_samples_report(fp, symbolizer);
+	else
+		err = run_overview_report(fp, symbolizer, &opts);
+
 	fclose(fp);
 	pmi_symbolizer_destroy(symbolizer);
-
-	qsort(entries, count, sizeof(*entries), compare_report_entry);
-	qsort(stack_entries, stack_count, sizeof(*stack_entries),
-	      compare_stack_entry);
-
-	printf("%-8s %-40s %s\n", "samples", "top", "events");
-	for (i = 0; i < count && i < opts.limit; ++i) {
-		size_t j;
-
-		printf("%-8zu %-40s ", entries[i].sample_count, entries[i].top);
-		if (entries[i].event_count == 0) {
-			printf("-");
-		} else {
-			for (j = 0; j < entries[i].event_count; ++j) {
-				if (j != 0)
-					printf(", ");
-				printf("%s=%" PRIu64, entries[i].events[j].name,
-				       entries[i].events[j].total);
-			}
-		}
-		printf("\n");
+	if (err) {
+		fprintf(stderr, "report failed: %s\n", strerror(-err));
+		return 1;
 	}
-
-	if (stack_count > 0) {
-		printf("\nfull stacks\n");
-		printf("%-8s %-60s %s\n", "samples", "stack", "events");
-		for (i = 0; i < stack_count && i < opts.limit; ++i) {
-			size_t j;
-
-			printf("%-8zu %-60s ", stack_entries[i].sample_count,
-			       stack_entries[i].stack);
-			if (stack_entries[i].event_count == 0) {
-				printf("-");
-			} else {
-				for (j = 0; j < stack_entries[i].event_count; ++j) {
-					if (j != 0)
-						printf(", ");
-					printf("%s=%" PRIu64, stack_entries[i].events[j].name,
-					       stack_entries[i].events[j].total);
-				}
-			}
-			printf("\n");
-		}
-	}
-
-	free(entries);
-	free(stack_entries);
 	return 0;
 }

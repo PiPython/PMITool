@@ -3,13 +3,26 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "pmi/perf_session.h"
+
+#define PMI_OUTPUT_MAX_TIDS 1024
+
+struct pmi_output_prev_state {
+	pid_t tid;
+	bool valid;
+	uint64_t values[PMI_MAX_EVENTS];
+	size_t event_count;
+};
 
 struct pmi_output_writer {
 	FILE *fp;
 	uint64_t seq;
 	uint64_t period_insn;
+	bool debug_perf;
+	struct pmi_output_prev_state prev[PMI_OUTPUT_MAX_TIDS];
+	size_t prev_count;
 };
 
 int pmi_output_open(struct pmi_output_writer *writer, const char *path,

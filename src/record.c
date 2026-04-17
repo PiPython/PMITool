@@ -511,6 +511,7 @@ int pmi_record_main(int argc, char **argv)
 		fprintf(stderr, "open output failed: %s\n", strerror(-err));
 		return 1;
 	}
+	rt.writer.debug_perf = rt.opts.debug_perf;
 	err = pmi_symbolizer_init(&rt.symbolizer);
 	if (err) {
 		fprintf(stderr, "symbolizer init failed: %s\n", strerror(-err));
