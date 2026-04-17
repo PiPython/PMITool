@@ -1,105 +1,105 @@
 # PMITool
 
-Linux/arm64 PMI sampler implemented in C with `perf_event_open`.
+基于 `perf_event_open` 的 Linux/arm64 PMI 采样工具，使用 C 实现。
 
-## Scope
+## 功能范围
 
-- Linux-only collector
-- Instruction-period sampling (`1,000,000` retired instructions by default)
-- Raw sibling PMU events from the CPU core PMU (`-e r0010,r0011`)
-- `perf` callchain capture in `--stack full` mode
-- Raw sample recording plus function-level report generation
+- 仅支持 Linux
+- 按指令周期采样，默认每退休 `1,000,000` 条指令采一次
+- 支持来自 CPU core PMU 的原始 sibling 事件（`-e r0010,r0011`）
+- 在 `--stack full` 模式下使用 `perf` 采集调用链
+- 支持原始样本落盘与函数级报表生成
 
-## Build prerequisites
+## 构建依赖
 
-The build is pure `perf_event_open`.
-You only need a C toolchain, Linux UAPI headers, and `libdl`.
+当前构建是纯 `perf_event_open` 方案。
+只需要 C 工具链、Linux UAPI 头文件以及 `libdl`。
 
 - `clang` or `gcc`
 - `make`
 - kernel headers / `linux-libc-dev`
 
-Debian/Ubuntu:
+Debian/Ubuntu：
 
 ```bash
 sudo apt-get install -y clang make linux-libc-dev
 make
 ```
 
-Fedora/RHEL:
+Fedora/RHEL：
 
 ```bash
 sudo dnf install -y clang make kernel-headers
 make
 ```
 
-openEuler:
+openEuler：
 
 ```bash
 sudo dnf install -y clang make kernel-headers
 make
 ```
 
-Arch Linux:
+Arch Linux：
 
 ```bash
 sudo pacman -S --needed clang make linux-headers
 make
 ```
 
-Run unit tests:
+运行单元测试：
 
 ```bash
 make test
 ```
 
-## Commands
+## 常用命令
 
-Record:
+录制：
 
 ```bash
 sudo ./build/pmi record -p 1234 -o samples.pmi
 ```
 
-Launch and record:
+启动新程序并录制：
 
 ```bash
 sudo ./build/pmi record -c 'taskset -c 0 ./bench' -s top -o samples.pmi
 ```
 
-Launch and record with raw PMU events plus a shorter sampling period and full stack:
+启动新程序并录制，同时指定原始 PMU 事件、较短采样周期和完整调用栈：
 
 ```bash
 sudo ./build/pmi record -c './bench' -n 100000 -e r0010,r0011 -s full -o samples.pmi
 ```
 
-Report:
+生成总览报表：
 
 ```bash
 ./build/pmi report -i samples.pmi -l 20
 ```
 
-Per-sample report:
+逐样本报表：
 
 ```bash
 ./build/pmi report -i samples.pmi -m samples
 ```
 
-Filter report output by one or more tids:
+按一个或多个 tid 过滤报表：
 
 ```bash
 ./build/pmi report -i samples.pmi -t 1234,5678
 ```
 
-`report` defaults to an overview table by `top` function and, when `-s full`
-samples exist, a second `full stacks` section with symbolized folded stacks.
-`-m samples` instead prints every sample in file order. Any `-e` events are
-expanded into one column per event name in both raw output and report output.
-When symbols are mangled C++ names, `report` will demangle them for display.
-`report` output is an aligned human-readable table; long `top` and `stack`
-fields are truncated with `...` to preserve terminal readability.
+`report` 默认输出按 `top` 函数聚合的总览表；如果存在 `-s full`
+采到的样本，还会额外输出一个 `full stacks` 分区，展示已经符号化的 folded stack。
+`-m samples` 会按文件顺序逐条输出每个 sample。若录制时指定了 `-e`，
+这些事件会在 raw 输出和 report 输出中展开为独立列。
+若符号名是 C++ mangled 名称，`report` 会在展示阶段自动做 demangle。
+`report` 输出是对齐的人类可读表格；过长的 `top` 和 `stack` 字段会截断为 `...`，
+以保证终端可读性。
 
-Help:
+帮助：
 
 ```bash
 ./build/pmi -h
@@ -107,50 +107,49 @@ Help:
 ./build/pmi report -h
 ```
 
-## Raw sample format
+## Raw 样本格式
 
-`record` writes tab-separated text records:
+`record` 输出的是以 tab 分隔的文本记录：
 
-Without `-e`, rows look like:
+不带 `-e` 时，每行形如：
 
 ```text
 S <seq> <insn_delta> <pid> <tid> <top> <stack>
 ```
 
-With `-e r0010,r0011`, rows look like:
+带 `-e r0010,r0011` 时，每行形如：
 
 ```text
 S <seq> <insn_delta> <pid> <tid> <r0010> <r0011> <top> <stack>
 ```
 
-- `seq`: sample sequence number starting from 1
-- `insn_delta`: instructions retired since the previous sample of the same `tid`
-- `top`: leaf function name; `-` when `-s` is omitted
-- each `-e` event becomes its own delta column named after the raw event, such
-  as `r0010` or `r0011`
-- `stack`: `-` when `-s` is omitted or `-s top`; with `-s full` it stores the
-  remaining raw callchain IPs after the leaf frame, such as `0xaaa;0xbbb`
+- `seq`：从 1 开始递增的样本序号
+- `insn_delta`：同一个 `tid` 相邻两次样本之间退休的指令数
+- `top`：栈顶/叶子函数名；如果未指定 `-s`，则为 `-`
+- 每个 `-e` 事件都会展开为一个独立的 delta 列，列名就是原始事件名，例如
+  `r0010` 或 `r0011`
+- `stack`：在未指定 `-s` 或指定 `-s top` 时为 `-`；在 `-s full` 时，
+  记录叶子帧之后剩余的原始调用链 IP，例如 `0xaaa;0xbbb`
 
-For each `tid`, the first sample writes the current counter values as its delta.
+对每个 `tid` 来说，第一条样本会直接把当前计数器值写成 delta。
 
-The file starts with:
+文件头固定为：
 
 ```text
 # pmi raw v3
 ```
 
-`report` reads only this v3 format.
-The raw file stays TSV; only `report` does aligned pretty-printing.
+`report` 只读取这个 v3 格式。
+raw 文件始终保持 TSV，不做对齐；只有 `report` 会做对齐后的可读化展示。
 
-## Current limits
+## 当前限制
 
-- Only Linux/arm64 is supported
-- Only CPU core PMU raw events are supported
-- `-e` requires a real CPU PMU; virtual environments without one will fail fast
-- `record --pid` snapshots and refreshes thread lists periodically, but does not
-  attempt to preserve symbol/mmap history after process exit
-- Omitting `-s` disables function and stack output entirely
-- `--stack full` uses `PERF_SAMPLE_CALLCHAIN`; user-space unwind quality depends
-  on the target binary keeping frame pointers
-- Raw stack addresses are recorded during capture and left for offline consumers
-  such as `report`
+- 仅支持 Linux/arm64
+- 仅支持 CPU core PMU 的原始事件
+- `-e` 依赖真实 CPU PMU；没有 CPU PMU 的虚拟环境会直接失败
+- `record --pid` 会周期性刷新线程列表，但不会在进程退出后保留完整的
+  symbol/mmap 历史
+- 不加 `-s` 时不会输出函数和栈信息
+- `--stack full` 依赖 `PERF_SAMPLE_CALLCHAIN`；用户态调用链质量取决于目标程序
+  是否保留 frame pointer
+- 录制阶段只保存原始栈地址，后续由 `report` 这类离线消费者做符号化
