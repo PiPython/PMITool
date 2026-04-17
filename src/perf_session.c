@@ -21,7 +21,7 @@
 #include "pmi/procfs.h"
 #include "pmi/strutil.h"
 
-#define PMI_PERF_BUFFER_PAGES 8
+#define PMI_PERF_BUFFER_PAGES 64
 #define PMI_EMPTY_DRAIN_LOG_INTERVAL 10
 
 static void perf_debugf(const struct pmi_perf_session *session,
@@ -314,6 +314,36 @@ static void fill_sample_names(struct pmi_perf_session *session,
 			    i < session->event_count ? (uint64_t)session->events[i].id : 0,
 			    sample->event_names[i], (uint64_t)sample->events[i].value);
 	}
+}
+
+static void compute_sample_deltas(struct pmi_perf_session *session,
+				  struct pmi_perf_sample *sample)
+{
+	size_t i;
+
+	if (!session || !sample)
+		return;
+
+	for (i = 0; i < sample->event_count; ++i) {
+		uint64_t current = sample->events[i].value;
+		uint64_t delta = current;
+
+		if (session->have_prev_values && i < session->prev_value_count) {
+			uint64_t previous = session->prev_values[i];
+
+			if (current >= previous) {
+				delta = current - previous;
+			} else if (session->debug_perf) {
+				perf_debugf(session, "read",
+					    "tid=%d slot=%zu current=%" PRIu64 " prev=%" PRIu64 " regression; using current",
+					    session->tid, i, current, previous);
+			}
+		}
+		sample->event_deltas[i] = delta;
+		session->prev_values[i] = current;
+	}
+	session->prev_value_count = sample->event_count;
+	session->have_prev_values = true;
 }
 
 static int open_event(struct pmi_perf_session *session, int group_fd, pid_t tid,
@@ -741,6 +771,7 @@ int pmi_perf_session_drain(struct pmi_perf_session *session, pmi_perf_sample_cb 
 				session->last_time_running = sample.events[0].time_running;
 				session->missing_periods_reported = 0;
 			}
+			compute_sample_deltas(session, &sample);
 			fill_sample_names(session, &sample);
 			err = cb(&sample, ctx);
 			if (err) {

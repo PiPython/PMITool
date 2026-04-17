@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "pmi/event.h"
@@ -22,9 +23,9 @@
 #include "pmi/procfs.h"
 #include "pmi/record.h"
 #include "pmi/strutil.h"
-#include "pmi/symbolizer.h"
 
 #define PMI_MAX_TRACKED_TIDS 1024
+#define PMI_THREAD_REFRESH_INTERVAL_MS 1000
 
 static volatile sig_atomic_t g_stop;
 
@@ -32,7 +33,6 @@ struct record_runtime {
 	struct pmi_record_options opts;
 	struct pmi_event_list events;
 	struct pmi_output_writer writer;
-	struct pmi_symbolizer *symbolizer;
 	struct pmi_perf_session sessions[PMI_MAX_TRACKED_TIDS];
 	size_t session_count;
 	pid_t target_pid;
@@ -54,8 +54,12 @@ static void record_usage(FILE *stream)
 		"  -e <raw-list>              raw PMU events, e.g. -e r0010,r0011\n"
 		"                             may be repeated; only CPU PMU raw events are supported\n"
 		"  -s, --stack <top|full>     function/stack mode; default: off\n"
+		"                             raw output stores addresses; use report for symbols\n"
 		"  -k, --kernel-stack <on|off>\n"
 		"                             include kernel samples and kernel callchain, default: off\n"
+		"      --write-mode <low-overhead|strict>\n"
+		"                             userspace write policy, default: low-overhead\n"
+		"                             low-overhead may drop userspace samples when writer is saturated\n"
 		"      --debug-perf           print perf_session debug logs to stderr\n"
 		"  -h, --help                 show this help\n"
 		"\n"
@@ -96,59 +100,23 @@ static bool session_exists(const struct record_runtime *rt, pid_t tid)
 	return false;
 }
 
-static void normalize_symbol(char *symbol)
+static uint64_t monotonic_ms(void)
 {
-	char *plus;
+	struct timespec ts;
 
-	if (!symbol || symbol[0] == '\0' || strncmp(symbol, "0x", 2) == 0)
-		return;
-
-	plus = strstr(symbol, "+0x");
-	if (plus)
-		*plus = '\0';
-}
-
-static void format_stack_ips(const uint64_t *ips, size_t begin, size_t depth,
-			     char *out, size_t out_cap)
-{
-	size_t i;
-	size_t len = 0;
-	bool wrote = false;
-
-	if (!out || out_cap == 0)
-		return;
-
-	out[0] = '\0';
-	for (i = begin; i < depth; ++i) {
-		int written;
-
-		if (ips[i] == 0)
-			continue;
-		written = snprintf(out + len, out_cap - len, "%s0x%" PRIx64,
-				   wrote ? ";" : "", ips[i]);
-		if (written < 0 || (size_t)written >= out_cap - len)
-			break;
-		len += (size_t)written;
-		wrote = true;
-	}
-
-	if (!wrote)
-		pmi_copy_cstr_trunc(out, out_cap, "-");
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
 }
 
 static int on_perf_sample(const struct pmi_perf_sample *sample, void *ctx)
 {
 	struct record_runtime *rt = ctx;
-	char module[PMI_MAX_MODULE_LEN];
-	char top[PMI_MAX_SYMBOL_LEN];
-	char stack[PMI_MAX_STACK_TEXT_LEN];
+	struct pmi_output_sample out = { 0 };
 	uint64_t top_ip = 0;
+	size_t i;
 
 	if (!sample)
 		return 0;
-
-	pmi_copy_cstr_trunc(top, sizeof(top), "-");
-	pmi_copy_cstr_trunc(stack, sizeof(stack), "-");
 
 	if (rt->opts.stack_mode == PMI_STACK_TOP) {
 		top_ip = sample->ip;
@@ -159,18 +127,19 @@ static int on_perf_sample(const struct pmi_perf_sample *sample, void *ctx)
 			top_ip = sample->ip;
 	}
 
-	if (top_ip != 0) {
-		pmi_copy_cstr_trunc(top, sizeof(top), "0x0");
-		pmi_symbolizer_symbolize_ip(rt->symbolizer, sample->pid, top_ip, module,
-					    sizeof(module), top, sizeof(top));
-		normalize_symbol(top);
+	out.pid = sample->pid;
+	out.tid = sample->tid;
+	out.top_ip = top_ip;
+	out.event_count = sample->event_count;
+	memcpy(out.event_deltas, sample->event_deltas, sizeof(out.event_deltas));
+
+	if (rt->opts.stack_mode == PMI_STACK_FULL && sample->callchain_count > 1) {
+		for (i = 1; i < sample->callchain_count && out.stack_depth < PMI_MAX_STACK_DEPTH;
+		     ++i)
+			out.stack_ips[out.stack_depth++] = sample->callchain[i];
 	}
 
-	if (rt->opts.stack_mode == PMI_STACK_FULL && sample->callchain_count > 1)
-		format_stack_ips(sample->callchain, 1, sample->callchain_count, stack,
-				 sizeof(stack));
-
-	return pmi_output_write_sample(&rt->writer, sample, top, stack);
+	return pmi_output_enqueue_sample(&rt->writer, &out);
 }
 
 static int attach_tid(struct record_runtime *rt, pid_t tid)
@@ -317,6 +286,19 @@ static int parse_onoff(const char *text, bool *out)
 	return -EINVAL;
 }
 
+static int parse_write_mode(const char *text, enum pmi_write_mode *out)
+{
+	if (strcmp(text, "low-overhead") == 0) {
+		*out = PMI_WRITE_LOW_OVERHEAD;
+		return 0;
+	}
+	if (strcmp(text, "strict") == 0) {
+		*out = PMI_WRITE_STRICT;
+		return 0;
+	}
+	return -EINVAL;
+}
+
 static int parse_record_options(int argc, char **argv, struct pmi_record_options *opts)
 {
 	static const struct option long_options[] = {
@@ -327,6 +309,7 @@ static int parse_record_options(int argc, char **argv, struct pmi_record_options
 		{ "period-insn", required_argument, NULL, 'n' },
 		{ "stack", required_argument, NULL, 's' },
 		{ "kernel-stack", required_argument, NULL, 'k' },
+		{ "write-mode", required_argument, NULL, 1002 },
 		{ "debug-perf", no_argument, NULL, 1001 },
 		{ "help", no_argument, NULL, 'h' },
 		{ "event", required_argument, NULL, 1000 },
@@ -337,7 +320,8 @@ static int parse_record_options(int argc, char **argv, struct pmi_record_options
 	memset(opts, 0, sizeof(*opts));
 	opts->period = 1000000;
 	opts->stack_mode = PMI_STACK_NONE;
-	opts->mmap_pages = 8;
+	opts->write_mode = PMI_WRITE_LOW_OVERHEAD;
+	opts->mmap_pages = 64;
 	opts->poll_timeout_ms = 200;
 	opterr = 0;
 	optind = 1;
@@ -392,6 +376,12 @@ static int parse_record_options(int argc, char **argv, struct pmi_record_options
 		case 1001:
 			opts->debug_perf = true;
 			break;
+		case 1002:
+			if (parse_write_mode(optarg, &opts->write_mode) != 0) {
+				fprintf(stderr, "invalid write mode: %s\n", optarg);
+				return -EINVAL;
+			}
+			break;
 		case 'h':
 			record_usage(stdout);
 			return 2;
@@ -426,6 +416,8 @@ static void close_runtime(struct record_runtime *rt)
 {
 	size_t i;
 	int status;
+	int output_err;
+	uint64_t dropped_samples;
 
 	for (i = 0; i < rt->session_count; ++i) {
 		int err;
@@ -453,8 +445,13 @@ static void close_runtime(struct record_runtime *rt)
 	}
 	for (i = 0; i < rt->session_count; ++i)
 		pmi_perf_session_close(&rt->sessions[i]);
-	pmi_output_close(&rt->writer);
-	pmi_symbolizer_destroy(rt->symbolizer);
+	dropped_samples = rt->writer.dropped_samples;
+	output_err = pmi_output_close(&rt->writer);
+	if (output_err)
+		fprintf(stderr, "close output failed: %s\n", strerror(-output_err));
+	if (dropped_samples > 0)
+		fprintf(stderr, "record userspace dropped %" PRIu64 " samples\n",
+			dropped_samples);
 	if (rt->child_pid > 0) {
 		kill(rt->child_pid, SIGTERM);
 		waitpid(rt->child_pid, &status, WNOHANG);
@@ -466,6 +463,7 @@ int pmi_record_main(int argc, char **argv)
 	struct record_runtime rt;
 	struct sigaction sa = { 0 };
 	const char *raw_event_ptrs[PMI_MAX_EVENTS - 1];
+	uint64_t next_refresh_ms = 0;
 	size_t i;
 	int err;
 
@@ -506,16 +504,10 @@ int pmi_record_main(int argc, char **argv)
 		}
 	}
 
-	err = pmi_output_open(&rt.writer, rt.opts.output_path, &rt.events);
+	err = pmi_output_open(&rt.writer, rt.opts.output_path, &rt.events,
+			      rt.opts.write_mode, rt.opts.debug_perf);
 	if (err) {
 		fprintf(stderr, "open output failed: %s\n", strerror(-err));
-		return 1;
-	}
-	rt.writer.debug_perf = rt.opts.debug_perf;
-	err = pmi_symbolizer_init(&rt.symbolizer);
-	if (err) {
-		fprintf(stderr, "symbolizer init failed: %s\n", strerror(-err));
-		close_runtime(&rt);
 		return 1;
 	}
 
@@ -535,19 +527,34 @@ int pmi_record_main(int argc, char **argv)
 	sa.sa_handler = on_signal;
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
+	if (rt.opts.pid || rt.opts.cmd)
+		next_refresh_ms = monotonic_ms() + PMI_THREAD_REFRESH_INTERVAL_MS;
 
 	while (!g_stop) {
 		struct pollfd fds[PMI_MAX_TRACKED_TIDS];
+		uint64_t now_ms = monotonic_ms();
 		nfds_t nfds = 0;
+		int timeout_ms = rt.opts.poll_timeout_ms;
 		int status;
+
+		if ((rt.opts.pid || rt.opts.cmd) && next_refresh_ms > now_ms) {
+			uint64_t wait_ms = next_refresh_ms - now_ms;
+
+			if (wait_ms < (uint64_t)timeout_ms)
+				timeout_ms = (int)wait_ms;
+		} else if (rt.opts.pid || rt.opts.cmd) {
+			timeout_ms = 0;
+		}
 		for (i = 0; i < rt.session_count; ++i) {
 			fds[nfds].fd = rt.sessions[i].leader_fd;
-			fds[nfds].events = POLLIN;
+			fds[nfds].events = POLLIN | POLLERR | POLLHUP;
 			nfds++;
 		}
 
-		poll(fds, nfds, rt.opts.poll_timeout_ms);
+		poll(fds, nfds, timeout_ms);
 		for (i = 0; i < rt.session_count; ++i) {
+			if ((fds[i].revents & (POLLIN | POLLERR | POLLHUP)) == 0)
+				continue;
 			err = pmi_perf_session_drain(&rt.sessions[i], on_perf_sample,
 						     &rt);
 			if (err) {
@@ -563,8 +570,11 @@ int pmi_record_main(int argc, char **argv)
 		if (g_stop)
 			break;
 
-		if (rt.opts.pid || rt.opts.cmd)
+		now_ms = monotonic_ms();
+		if ((rt.opts.pid || rt.opts.cmd) && now_ms >= next_refresh_ms) {
 			attach_target_threads(&rt, rt.target_pid);
+			next_refresh_ms = now_ms + PMI_THREAD_REFRESH_INTERVAL_MS;
+		}
 
 		if (rt.child_pid > 0) {
 			pid_t rc = waitpid(rt.child_pid, &status, WNOHANG);

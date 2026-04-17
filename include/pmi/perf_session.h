@@ -19,6 +19,7 @@ struct pmi_perf_sample {
 	uint32_t cpu;
 	char comm[PMI_COMM_LEN];
 	struct pmi_event_value events[PMI_MAX_EVENTS];
+	uint64_t event_deltas[PMI_MAX_EVENTS];
 	char event_names[PMI_MAX_EVENTS][PMI_MAX_EVENT_NAME];
 	uint64_t callchain[PMI_MAX_STACK_DEPTH];
 	size_t event_count;
@@ -57,6 +58,9 @@ struct pmi_perf_session {
 	uint64_t last_time_enabled;
 	uint64_t last_time_running;
 	uint64_t missing_periods_reported;
+	uint64_t prev_values[PMI_MAX_EVENTS];
+	size_t prev_value_count;
+	bool have_prev_values;
 	bool count_grew;
 	struct pmi_opened_event events[PMI_MAX_EVENTS];
 	size_t event_count;

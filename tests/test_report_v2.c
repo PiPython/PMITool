@@ -21,6 +21,11 @@ __attribute__((noinline)) static void report_fixture_parent(void)
 	__asm__ __volatile__("" ::: "memory");
 }
 
+__attribute__((noinline)) static void report_fixture_extremely_long_named_function_for_alignment_testing(void)
+{
+	__asm__ __volatile__("" ::: "memory");
+}
+
 int main(void)
 {
 	char input_path[] = "/tmp/pmi-report-input-XXXXXX";
@@ -30,8 +35,8 @@ int main(void)
 	char output[16384] = { 0 };
 	char samples_output[16384] = { 0 };
 	char stack_field[128];
-	char top_field[64];
-	char long_top[160];
+	char mangled_top[64];
+	char long_top_field[64];
 	char long_stack_field[1024];
 	char *overview_argv[] = { "report", "-i", input_path, "-l", "10", "-t",
 				  "202", NULL };
@@ -44,14 +49,16 @@ int main(void)
 	int saved_stdout;
 	int err;
 	uint64_t parent_ip = (uint64_t)(uintptr_t)&report_fixture_parent;
+	uint64_t long_top_ip =
+		(uint64_t)(uintptr_t)&report_fixture_extremely_long_named_function_for_alignment_testing;
 	size_t offset = 0;
 	int i;
 
 	snprintf(stack_field, sizeof(stack_field), "0x%llx",
 		 (unsigned long long)parent_ip);
-	snprintf(top_field, sizeof(top_field), "%s", "_ZN3foo3barEi");
-	memset(long_top, 'T', sizeof(long_top) - 1);
-	long_top[sizeof(long_top) - 1] = '\0';
+	snprintf(mangled_top, sizeof(mangled_top), "%s", "_ZN3foo3barEi");
+	snprintf(long_top_field, sizeof(long_top_field), "0x%llx",
+		 (unsigned long long)long_top_ip);
 	long_stack_field[0] = '\0';
 	for (i = 0; i < 20; ++i) {
 		offset += (size_t)snprintf(long_stack_field + offset,
@@ -71,10 +78,10 @@ int main(void)
 		getpid(), 101);
 	fprintf(fp,
 		"S\t2\t100\t%d\t%d\t7\t0\t%s\t%s\n",
-		getpid(), 202, top_field, stack_field);
+		getpid(), 202, mangled_top, stack_field);
 	fprintf(fp,
 		"S\t3\t200\t%d\t%d\t9\t11\t%s\t%s\n",
-		getpid(), 202, long_top, long_stack_field);
+		getpid(), 202, long_top_field, long_stack_field);
 	fclose(fp);
 
 	output_fd = mkstemp(output_overview_path);
@@ -102,6 +109,7 @@ int main(void)
 	CHECK(strstr(output, "top") != NULL);
 	CHECK(strstr(output, "leaf") == NULL);
 	CHECK(strstr(output, "foo::bar(int)") != NULL);
+	CHECK(strstr(output, long_top_field) == NULL);
 	CHECK(strstr(output, "full stacks") != NULL);
 	CHECK(strstr(output, "foo::bar(int);report_fixture_parent") != NULL);
 	CHECK(strstr(output, "1000000") == NULL);
@@ -112,7 +120,6 @@ int main(void)
 	CHECK(strchr(output, '\t') == NULL);
 	CHECK(strstr(output, "samples  insn_delta") != NULL);
 	CHECK(strstr(output, "-------") != NULL);
-	CHECK(strstr(output, long_top) == NULL);
 	CHECK(strstr(output, "...") != NULL);
 	CHECK(strstr(output, "leaf") == NULL);
 
@@ -145,7 +152,7 @@ int main(void)
 	CHECK(strstr(samples_output, "-------") != NULL);
 	CHECK(strstr(samples_output, "leaf") == NULL);
 	CHECK(strstr(samples_output, "foo::bar(int);report_fixture_parent") != NULL);
-	CHECK(strstr(samples_output, long_top) == NULL);
+	CHECK(strstr(samples_output, long_top_field) == NULL);
 	CHECK(strstr(samples_output, "...") != NULL);
 
 	unlink(input_path);
