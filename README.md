@@ -96,6 +96,8 @@ samples exist, a second `full stacks` section with symbolized folded stacks.
 `-m samples` instead prints every sample in file order. Any `-e` events are
 expanded into one column per event name in both raw output and report output.
 When symbols are mangled C++ names, `report` will demangle them for display.
+`report` output is an aligned human-readable table; long `top` and `stack`
+fields are truncated with `...` to preserve terminal readability.
 
 Help:
 
@@ -138,6 +140,7 @@ The file starts with:
 ```
 
 `report` reads only this v3 format.
+The raw file stays TSV; only `report` does aligned pretty-printing.
 
 ## Current limits
 

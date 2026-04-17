@@ -27,10 +27,12 @@ int main(void)
 	char output_overview_path[] = "/tmp/pmi-report-overview-XXXXXX";
 	char output_samples_path[] = "/tmp/pmi-report-samples-XXXXXX";
 	char line[1024];
-	char output[4096] = { 0 };
-	char samples_output[4096] = { 0 };
+	char output[16384] = { 0 };
+	char samples_output[16384] = { 0 };
 	char stack_field[128];
 	char top_field[64];
+	char long_top[160];
+	char long_stack_field[1024];
 	char *overview_argv[] = { "report", "-i", input_path, "-l", "10", "-t",
 				  "202", NULL };
 	char *samples_argv[] = { "report", "-i", input_path, "-m", "samples",
@@ -42,10 +44,21 @@ int main(void)
 	int saved_stdout;
 	int err;
 	uint64_t parent_ip = (uint64_t)(uintptr_t)&report_fixture_parent;
+	size_t offset = 0;
+	int i;
 
 	snprintf(stack_field, sizeof(stack_field), "0x%llx",
 		 (unsigned long long)parent_ip);
 	snprintf(top_field, sizeof(top_field), "%s", "_ZN3foo3barEi");
+	memset(long_top, 'T', sizeof(long_top) - 1);
+	long_top[sizeof(long_top) - 1] = '\0';
+	long_stack_field[0] = '\0';
+	for (i = 0; i < 20; ++i) {
+		offset += (size_t)snprintf(long_stack_field + offset,
+					   sizeof(long_stack_field) - offset,
+					   "%s0x%llx", i ? ";" : "",
+					   (unsigned long long)parent_ip);
+	}
 
 	input_fd = mkstemp(input_path);
 	CHECK(input_fd >= 0);
@@ -59,6 +72,9 @@ int main(void)
 	fprintf(fp,
 		"S\t2\t100\t%d\t%d\t7\t0\t%s\t%s\n",
 		getpid(), 202, top_field, stack_field);
+	fprintf(fp,
+		"S\t3\t200\t%d\t%d\t9\t11\t%s\t%s\n",
+		getpid(), 202, long_top, long_stack_field);
 	fclose(fp);
 
 	output_fd = mkstemp(output_overview_path);
@@ -90,12 +106,15 @@ int main(void)
 	CHECK(strstr(output, "foo::bar(int);report_fixture_parent") != NULL);
 	CHECK(strstr(output, "1000000") == NULL);
 	CHECK(strstr(output, "100") != NULL);
+	CHECK(strstr(output, "200") != NULL);
 	CHECK(strstr(output, "r0010") != NULL);
 	CHECK(strstr(output, "r0011") != NULL);
-	CHECK(strstr(output, "\t3\t5\tleaf") == NULL &&
-	      strstr(output, "3\t5\tleaf") == NULL);
-	CHECK(strstr(output, "\t7\t0\tfoo::bar(int)") != NULL ||
-	      strstr(output, "7\t0\tfoo::bar(int)") != NULL);
+	CHECK(strchr(output, '\t') == NULL);
+	CHECK(strstr(output, "samples  insn_delta") != NULL);
+	CHECK(strstr(output, "-------") != NULL);
+	CHECK(strstr(output, long_top) == NULL);
+	CHECK(strstr(output, "...") != NULL);
+	CHECK(strstr(output, "leaf") == NULL);
 
 	samples_output_fd = mkstemp(output_samples_path);
 	CHECK(samples_output_fd >= 0);
@@ -121,10 +140,13 @@ int main(void)
 	CHECK(strstr(samples_output, "insn_delta") != NULL);
 	CHECK(strstr(samples_output, "r0010") != NULL);
 	CHECK(strstr(samples_output, "r0011") != NULL);
+	CHECK(strchr(samples_output, '\t') == NULL);
+	CHECK(strstr(samples_output, "seq  pid") != NULL);
+	CHECK(strstr(samples_output, "-------") != NULL);
 	CHECK(strstr(samples_output, "leaf") == NULL);
 	CHECK(strstr(samples_output, "foo::bar(int);report_fixture_parent") != NULL);
-	CHECK(strstr(samples_output, "\t7\t0\tfoo::bar(int)") != NULL ||
-	      strstr(samples_output, "7\t0\tfoo::bar(int)") != NULL);
+	CHECK(strstr(samples_output, long_top) == NULL);
+	CHECK(strstr(samples_output, "...") != NULL);
 
 	unlink(input_path);
 	unlink(output_overview_path);
