@@ -183,12 +183,12 @@ int main(void)
 	CHECK(strstr(visual_output, "<!doctype html>") != NULL);
 	CHECK(strstr(visual_output, "const reportData =") != NULL);
 	CHECK(strstr(visual_output, "tid-select") != NULL);
-	CHECK(strstr(visual_output, "overview-canvas") != NULL);
-	CHECK(strstr(visual_output, "detail-frame") != NULL);
-	CHECK(strstr(visual_output, "全量概览") != NULL);
-	CHECK(strstr(visual_output, "细节散点图") != NULL);
-	CHECK(strstr(visual_output, "当前区间逐 Sample 折线图") != NULL);
-	CHECK(strstr(visual_output, "requestAnimationFrame") != NULL);
+	CHECK(strstr(visual_output, "phase-heatmap") != NULL);
+	CHECK(strstr(visual_output, "phase-detail") != NULL);
+	CHECK(strstr(visual_output, "阶段热条图") != NULL);
+	CHECK(strstr(visual_output, "阶段热点榜") != NULL);
+	CHECK(strstr(visual_output, "该阶段热点榜") != NULL);
+	CHECK(strstr(visual_output, "该阶段 full stacks") != NULL);
 	CHECK(strstr(visual_output, "\"r0010\"") != NULL);
 	CHECK(strstr(visual_output, "\"r0011\"") != NULL);
 	CHECK(strstr(visual_output, "foo::bar(int)") != NULL);
@@ -196,9 +196,12 @@ int main(void)
 	CHECK(strstr(visual_output, long_top_field) == NULL);
 	CHECK(strstr(visual_output, stack_field) == NULL);
 	CHECK(strstr(visual_output, "windowSamples") == NULL);
-	CHECK(strstr(visual_output, "热点函数 × 窗口") == NULL);
-	CHECK(strstr(visual_output, "总 sample 数趋势") == NULL);
-	CHECK(strstr(visual_output, "按 Sample 序号的全量时序图") == NULL);
+	CHECK(strstr(visual_output, "overview-canvas") == NULL);
+	CHECK(strstr(visual_output, "detail-frame") == NULL);
+	CHECK(strstr(visual_output, "全量概览") == NULL);
+	CHECK(strstr(visual_output, "细节散点图") == NULL);
+	CHECK(strstr(visual_output, "当前区间逐 Sample 折线图") == NULL);
+	CHECK(strstr(visual_output, "requestAnimationFrame") == NULL);
 
 	saved_stderr = dup(STDERR_FILENO);
 	CHECK(saved_stderr >= 0);

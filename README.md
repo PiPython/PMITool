@@ -111,8 +111,9 @@ sudo ./build/pmi record -c './bench' --write-mode strict -o samples.pmi
 若符号名是 C++ mangled 名称，`report` 会在展示阶段自动做 demangle。
 `report` 输出是对齐的人类可读表格；过长的 `top` 和 `stack` 字段会截断为 `...`，
 以保证终端可读性。
-`-m visual` 会生成单文件离线 HTML，先展示全量概览，再通过 brush 选区进入细节散点图和当前区间趋势图；
-横轴始终是 sample 序号 `seq`，这里的“时间变化”严格表示“随采样序号推进的变化”，不是 wall-clock 时间。
+`-m visual` 会生成单文件离线 HTML，以阶段热条图展示不同 seq 阶段的热点函数变化；
+点击某个阶段后，会在下方展示该阶段的热点榜和 folded stack 汇总。横轴始终是 sample 序号 `seq`，
+这里的“时间变化”严格表示“随采样序号推进的变化”，不是 wall-clock 时间。
 `record` 热路径不会做符号化；raw 文件中的 `top` 和 `stack` 只保存地址，
 人类可读函数名全部由 `report` 离线解析。
 
