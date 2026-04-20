@@ -34,6 +34,7 @@ struct pmi_report_options {
 	const char *output_path;
 	size_t limit;
 	size_t window_samples;
+	bool saw_window_samples;
 	pid_t tids[1024];
 	size_t tid_count;
 	enum {

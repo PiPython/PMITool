@@ -79,14 +79,13 @@ static void report_usage(FILE *stream)
 		"  -l, --limit <N>              max rows, default: 20\n"
 		"  -m, --mode <overview|samples|visual>\n"
 		"                               default: overview\n"
-		"  -w, --window-samples <N>     samples per visual window, default: 200\n"
 		"  -t, --tid <tid1,tid2,...>    filter samples by tid list\n"
 		"  -h, --help                   show this help\n"
 		"\n"
 		"examples:\n"
 		"  pmi report -i out.pmi\n"
 		"  pmi report -i out.pmi -t 1234,5678 -m samples\n"
-		"  pmi report -i out.pmi -m visual -o out.html -w 200\n");
+		"  pmi report -i out.pmi -m visual -o out.html\n");
 }
 
 static char *trim_field(char *field)
@@ -473,6 +472,7 @@ static int parse_report_options(int argc, char **argv, struct pmi_report_options
 			break;
 		case 'w':
 			opts->window_samples = strtoull(optarg, NULL, 10);
+			opts->saw_window_samples = true;
 			break;
 		case 't':
 			if (parse_tid_list(opts, optarg) != 0) {
@@ -505,6 +505,11 @@ static int parse_report_options(int argc, char **argv, struct pmi_report_options
 	}
 	if (opts->window_samples == 0) {
 		fprintf(stderr, "window size must be greater than 0\n");
+		return -EINVAL;
+	}
+	if (opts->mode == PMI_REPORT_VISUAL && opts->saw_window_samples) {
+		fprintf(stderr,
+			"-w/--window-samples is not supported in visual mode\n");
 		return -EINVAL;
 	}
 	if (opts->mode == PMI_REPORT_VISUAL && !opts->output_path) {
@@ -1186,8 +1191,7 @@ out:
 }
 
 static int write_visual_html(FILE *out, const struct sample_row *rows, size_t count,
-			     const struct report_schema *schema,
-			     const struct pmi_report_options *opts)
+			     const struct report_schema *schema)
 {
 	size_t i;
 	size_t j;
@@ -1211,7 +1215,7 @@ static int write_visual_html(FILE *out, const struct sample_row *rows, size_t co
 		"<div class=\"page\">\n"
 		"<section class=\"panel\">\n"
 		"<h1>PMI 时序热点可视化</h1>\n"
-		"<p class=\"hint\">横轴表示按采样序号分桶后的窗口，不是 wall-clock 时间。</p>\n"
+		"<p class=\"hint\">横轴直接使用原始 sample 序号 seq，不做窗口聚合，也不是 wall-clock 时间。</p>\n"
 		"<div id=\"summary\" class=\"summary-grid\"></div>\n"
 		"</section>\n"
 		"<section class=\"panel\">\n"
@@ -1222,12 +1226,12 @@ static int write_visual_html(FILE *out, const struct sample_row *rows, size_t co
 		"</div>\n"
 		"</section>\n"
 		"<section class=\"panel\">\n"
-		"<div class=\"chart-title\">热点函数 × 窗口</div>\n"
-		"<div class=\"chart-frame\" id=\"heatmap-frame\"></div>\n"
-		"<div class=\"legend\"><span class=\"swatch\"></span><span>颜色深浅表示该窗口内该函数的 sample 数。</span></div>\n"
+		"<div class=\"chart-title\">按 Sample 序号的全量时序图</div>\n"
+		"<div class=\"chart-frame\" id=\"sample-frame\"></div>\n"
+		"<div class=\"legend\"><span class=\"swatch\"></span><span>每个点表示一个 sample，颜色深浅表示该 sample 的 insn_delta。</span></div>\n"
 		"</section>\n"
 		"<section class=\"panel\">\n"
-		"<div class=\"chart-title\">趋势副图</div>\n"
+		"<div class=\"chart-title\">逐 Sample 折线图</div>\n"
 		"<div class=\"trend-grid\" id=\"trend-grid\"></div>\n"
 		"</section>\n"
 		"</div>\n"
@@ -1237,12 +1241,6 @@ static int write_visual_html(FILE *out, const struct sample_row *rows, size_t co
 	if (err)
 		return err;
 
-	err = file_printf(out, "  windowSamples: %zu,\n", opts->window_samples);
-	if (err)
-		return err;
-	err = file_printf(out, "  topLimit: %zu,\n", opts->limit);
-	if (err)
-		return err;
 	err = file_puts_checked(out, "  eventNames: [");
 	if (err)
 		return err;
@@ -1291,23 +1289,21 @@ static int write_visual_html(FILE *out, const struct sample_row *rows, size_t co
 		"};\n"
 		"const state = { tid: 'all' };\n"
 		"const tooltip = document.getElementById('tooltip');\n"
-		"function sum(arr){return arr.reduce((a,b)=>a+b,0);}\n"
 		"function escapeHtml(value){return String(value).replace(/[&<>\"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]));}\n"
 		"function uniqueTids(samples){return [...new Set(samples.map((s)=>s.tid))].sort((a,b)=>a-b);}\n"
-		"function windowRangeLabel(index){const start=index*reportData.windowSamples+1;const end=start+reportData.windowSamples-1;return `${start}-${end}`;}\n"
-		"function metricZero(){return {sampleCount:0,insnDelta:0,events:Array(reportData.eventNames.length).fill(0)};}\n"
-		"function metricClone(src){return {sampleCount:src.sampleCount,insnDelta:src.insnDelta,events:src.events.slice()};}\n"
 		"function getFilteredSamples(){if(state.tid==='all') return reportData.samples; return reportData.samples.filter((sample)=>String(sample.tid)===state.tid);}\n"
-		"function computeView(samples){const windows=[];const topTotals=new Map();let maxWindow=-1;for(const sample of samples){const windowIndex=Math.floor((sample.seq-1)/reportData.windowSamples);const top=(sample.top&&sample.top!=='-')?sample.top:'[unknown]';maxWindow=Math.max(maxWindow,windowIndex);while(windows.length<=windowIndex){windows.push({sampleCount:0,insnDelta:0,events:Array(reportData.eventNames.length).fill(0),topMetrics:new Map()});}const bucket=windows[windowIndex];bucket.sampleCount+=1;bucket.insnDelta+=sample.insnDelta;sample.events.forEach((value,index)=>bucket.events[index]+=value);let metric=bucket.topMetrics.get(top);if(!metric){metric=metricZero();bucket.topMetrics.set(top,metric);}metric.sampleCount+=1;metric.insnDelta+=sample.insnDelta;sample.events.forEach((value,index)=>metric.events[index]+=value);topTotals.set(top,(topTotals.get(top)||0)+1);}const topNames=[...topTotals.entries()].sort((lhs,rhs)=>rhs[1]-lhs[1]||lhs[0].localeCompare(rhs[0])).slice(0,reportData.topLimit).map((entry)=>entry[0]);const matrix=topNames.map((name)=>windows.map((bucket)=>bucket.topMetrics.has(name)?metricClone(bucket.topMetrics.get(name)):metricZero()));return {samples,windows,topNames,matrix,totalSamples:samples.length,totalInsn:windows.reduce((acc,bucket)=>acc+bucket.insnDelta,0)};}\n"
-		"function renderSummary(view){const tids=uniqueTids(reportData.samples);const summary=document.getElementById('summary');summary.innerHTML='';const cards=[['样本数',String(view.totalSamples)],['窗口数',String(view.windows.length)],['全局 TopN',String(reportData.topLimit)],['事件列',reportData.eventNames.length?reportData.eventNames.join(', '):'-'],['当前 TID',state.tid==='all'?'All':state.tid],['可选 TID',tids.length?tids.join(', '):'-']];for(const [label,value] of cards){const card=document.createElement('div');card.className='stat';card.innerHTML=`<div class=\"label\">${escapeHtml(label)}</div><div class=\"value\">${escapeHtml(value)}</div>`;summary.appendChild(card);}}\n"
+		"function normalizeTop(sample){return sample.top && sample.top !== '-' ? sample.top : '[unknown]';}\n"
+		"function computeView(samples){const normalized=samples.map((sample)=>({seq:sample.seq,pid:sample.pid,tid:sample.tid,insnDelta:sample.insnDelta,top:normalizeTop(sample),events:sample.events.slice()}));const topTotals=new Map();let maxInsn=1;let minSeq=0;let maxSeq=0;normalized.forEach((sample,index)=>{topTotals.set(sample.top,(topTotals.get(sample.top)||0)+1);if(sample.insnDelta>maxInsn)maxInsn=sample.insnDelta;if(index===0){minSeq=sample.seq;maxSeq=sample.seq;}else{if(sample.seq<minSeq)minSeq=sample.seq;if(sample.seq>maxSeq)maxSeq=sample.seq;}});const topNames=[...topTotals.entries()].sort((lhs,rhs)=>rhs[1]-lhs[1]||lhs[0].localeCompare(rhs[0])).map((entry)=>entry[0]);const topIndex=new Map(topNames.map((name,index)=>[name,index]));return {samples:normalized,topNames,topIndex,functionCount:topNames.length,totalSamples:normalized.length,maxInsn,minSeq,maxSeq};}\n"
+		"function renderSummary(view){const tids=uniqueTids(reportData.samples);const summary=document.getElementById('summary');summary.innerHTML='';const seqRange=view.totalSamples?`${view.minSeq}-${view.maxSeq}`:'-';const cards=[['样本数',String(view.totalSamples)],['函数数',String(view.functionCount)],['seq 范围',seqRange],['当前 TID',state.tid==='all'?'All':state.tid],['可选 TID',tids.length?tids.join(', '):'-'],['事件列',reportData.eventNames.length?reportData.eventNames.join(', '):'-']];for(const [label,value] of cards){const card=document.createElement('div');card.className='stat';card.innerHTML=`<div class=\"label\">${escapeHtml(label)}</div><div class=\"value\">${escapeHtml(value)}</div>`;summary.appendChild(card);}}\n"
 		"function renderTidSelect(){const select=document.getElementById('tid-select');const tids=uniqueTids(reportData.samples);select.innerHTML='';const allOption=document.createElement('option');allOption.value='all';allOption.textContent='All';select.appendChild(allOption);for(const tid of tids){const option=document.createElement('option');option.value=String(tid);option.textContent=String(tid);select.appendChild(option);}select.value=state.tid;select.onchange=()=>{state.tid=select.value;updateView();};}\n"
-		"function colorFor(value,maxValue){if(maxValue<=0||value<=0) return '#f8fafc';const ratio=value/maxValue;if(ratio<0.35) return '#fde68a';if(ratio<0.7) return '#f59e0b';return '#d9485f';}\n"
+		"function colorFor(value,maxValue){if(maxValue<=0||value<=0) return '#f8fafc';const ratio=value/maxValue;if(ratio<0.15) return '#fff7ed';if(ratio<0.35) return '#fde68a';if(ratio<0.6) return '#f59e0b';return '#d9485f';}\n"
 		"function showTooltip(event,html){tooltip.innerHTML=html;tooltip.style.display='block';tooltip.style.left=`${event.clientX+14}px`;tooltip.style.top=`${event.clientY+14}px`;}\n"
 		"function hideTooltip(){tooltip.style.display='none';}\n"
-		"function renderHeatmap(view){const frame=document.getElementById('heatmap-frame');frame.innerHTML='';if(view.topNames.length===0||view.windows.length===0){frame.innerHTML='<div class=\"empty\">当前筛选条件下没有可视化样本。</div>';return;}const leftPad=260;const topPad=48;const cellWidth=Math.max(14,Math.min(28,Math.floor(980/Math.max(1,view.windows.length))));const cellHeight=24;const svgWidth=leftPad+view.windows.length*cellWidth+24;const svgHeight=topPad+view.topNames.length*cellHeight+24;const maxValue=Math.max(1,...view.matrix.flat().map((metric)=>metric.sampleCount));const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('width',String(svgWidth));svg.setAttribute('height',String(svgHeight));svg.setAttribute('viewBox',`0 0 ${svgWidth} ${svgHeight}`);for(let col=0;col<view.windows.length;col++){const label=document.createElementNS('http://www.w3.org/2000/svg','text');label.setAttribute('x',String(leftPad+col*cellWidth+cellWidth/2));label.setAttribute('y','24');label.setAttribute('text-anchor','middle');label.setAttribute('font-size','11');label.setAttribute('fill','#6b7280');label.textContent=String(col+1);svg.appendChild(label);}for(let row=0;row<view.topNames.length;row++){const name=view.topNames[row];const label=document.createElementNS('http://www.w3.org/2000/svg','text');label.setAttribute('x',String(leftPad-10));label.setAttribute('y',String(topPad+row*cellHeight+16));label.setAttribute('text-anchor','end');label.setAttribute('font-size','12');label.setAttribute('fill','#1f2937');label.textContent=name;svg.appendChild(label);for(let col=0;col<view.windows.length;col++){const metric=view.matrix[row][col];const rect=document.createElementNS('http://www.w3.org/2000/svg','rect');rect.setAttribute('x',String(leftPad+col*cellWidth));rect.setAttribute('y',String(topPad+row*cellHeight));rect.setAttribute('width',String(cellWidth-1));rect.setAttribute('height',String(cellHeight-1));rect.setAttribute('rx','3');rect.setAttribute('fill',colorFor(metric.sampleCount,maxValue));rect.addEventListener('mousemove',(event)=>{const eventRows=reportData.eventNames.map((name,index)=>`${escapeHtml(name)}: ${metric.events[index]}`).join('<br>');showTooltip(event,`<strong>${escapeHtml(name)}</strong><br>窗口: ${windowRangeLabel(col)}<br>sample 数: ${metric.sampleCount}<br>insn_delta: ${metric.insnDelta}${eventRows?`<br>${eventRows}`:''}`);});rect.addEventListener('mouseleave',hideTooltip);svg.appendChild(rect);}}frame.appendChild(svg);const note=document.createElement('div');note.className='small-note';note.textContent='热力图窗口编号从 1 开始，tooltip 中显示该窗口覆盖的采样序号范围。';frame.appendChild(note);}\n"
-		"function renderLineChart(parent,title,values,color){const card=document.createElement('div');const heading=document.createElement('div');heading.className='chart-title';heading.textContent=title;card.appendChild(heading);if(values.length===0){const empty=document.createElement('div');empty.className='empty';empty.textContent='没有可展示的数据。';card.appendChild(empty);parent.appendChild(card);return;}const width=Math.max(900,values.length*18);const height=180;const left=48;const top=16;const innerWidth=width-left-18;const innerHeight=height-top-28;const maxValue=Math.max(1,...values);const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('width',String(width));svg.setAttribute('height',String(height));svg.setAttribute('viewBox',`0 0 ${width} ${height}`);const axis=document.createElementNS('http://www.w3.org/2000/svg','line');axis.setAttribute('x1',String(left));axis.setAttribute('y1',String(top+innerHeight));axis.setAttribute('x2',String(left+innerWidth));axis.setAttribute('y2',String(top+innerHeight));axis.setAttribute('stroke','#cbd5e1');axis.setAttribute('stroke-width','1');svg.appendChild(axis);const polyline=document.createElementNS('http://www.w3.org/2000/svg','polyline');const points=values.map((value,index)=>{const x=left+(values.length===1?0:index*(innerWidth/(values.length-1||1)));const y=top+innerHeight-(value/maxValue)*innerHeight;return `${x},${y}`;});polyline.setAttribute('fill','none');polyline.setAttribute('stroke',color);polyline.setAttribute('stroke-width','2.5');polyline.setAttribute('points',points.join(' '));svg.appendChild(polyline);values.forEach((value,index)=>{const x=left+(values.length===1?0:index*(innerWidth/(values.length-1||1)));const y=top+innerHeight-(value/maxValue)*innerHeight;const dot=document.createElementNS('http://www.w3.org/2000/svg','circle');dot.setAttribute('cx',String(x));dot.setAttribute('cy',String(y));dot.setAttribute('r','3');dot.setAttribute('fill',color);dot.addEventListener('mousemove',(event)=>showTooltip(event,`<strong>${escapeHtml(title)}</strong><br>窗口: ${windowRangeLabel(index)}<br>值: ${value}`));dot.addEventListener('mouseleave',hideTooltip);svg.appendChild(dot);});const maxLabel=document.createElementNS('http://www.w3.org/2000/svg','text');maxLabel.setAttribute('x','6');maxLabel.setAttribute('y',String(top+12));maxLabel.setAttribute('font-size','11');maxLabel.setAttribute('fill','#6b7280');maxLabel.textContent=String(maxValue);svg.appendChild(maxLabel);const endLabel=document.createElementNS('http://www.w3.org/2000/svg','text');endLabel.setAttribute('x',String(left+innerWidth));endLabel.setAttribute('y',String(height-6));endLabel.setAttribute('text-anchor','end');endLabel.setAttribute('font-size','11');endLabel.setAttribute('fill','#6b7280');endLabel.textContent=`窗口数: ${values.length}`;svg.appendChild(endLabel);const frame=document.createElement('div');frame.className='chart-frame';frame.appendChild(svg);card.appendChild(frame);parent.appendChild(card);}\n"
-		"function renderTrends(view){const grid=document.getElementById('trend-grid');grid.innerHTML='';const sampleSeries=view.windows.map((bucket)=>bucket.sampleCount);const insnSeries=view.windows.map((bucket)=>bucket.insnDelta);renderLineChart(grid,'总 sample 数趋势',sampleSeries,'#0f766e');renderLineChart(grid,'insn_delta 趋势',insnSeries,'#2563eb');const palette=['#b91c1c','#7c3aed','#0f766e','#ea580c','#0891b2','#65a30d','#be185d'];reportData.eventNames.forEach((name,index)=>{renderLineChart(grid,`${name} delta 趋势`,view.windows.map((bucket)=>bucket.events[index]),palette[index%palette.length]);});}\n"
-		"function updateView(){const filtered=getFilteredSamples();const view=computeView(filtered);renderSummary(view);renderHeatmap(view);renderTrends(view);}renderTidSelect();updateView();\n"
+		"function formatEventRows(sample){return reportData.eventNames.map((name,index)=>`${escapeHtml(name)}: ${sample.events[index]}`).join('<br>');}\n"
+		"function renderSampleSequence(view){const frame=document.getElementById('sample-frame');frame.innerHTML='';if(view.samples.length===0||view.topNames.length===0){frame.innerHTML='<div class=\"empty\">当前筛选条件下没有可视化样本。</div>';return;}const leftPad=280;const topPad=20;const bottomPad=32;const rowHeight=22;const seqSpan=Math.max(1,view.maxSeq-view.minSeq);const innerWidth=Math.max(900,seqSpan*10);const svgWidth=leftPad+innerWidth+24;const svgHeight=topPad+view.topNames.length*rowHeight+bottomPad;const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('width',String(svgWidth));svg.setAttribute('height',String(svgHeight));svg.setAttribute('viewBox',`0 0 ${svgWidth} ${svgHeight}`);const axis=document.createElementNS('http://www.w3.org/2000/svg','line');axis.setAttribute('x1',String(leftPad));axis.setAttribute('y1',String(svgHeight-bottomPad+6));axis.setAttribute('x2',String(svgWidth-12));axis.setAttribute('y2',String(svgHeight-bottomPad+6));axis.setAttribute('stroke','#cbd5e1');axis.setAttribute('stroke-width','1');svg.appendChild(axis);view.topNames.forEach((name,index)=>{const y=topPad+index*rowHeight+rowHeight/2;const label=document.createElementNS('http://www.w3.org/2000/svg','text');label.setAttribute('x',String(leftPad-10));label.setAttribute('y',String(y+4));label.setAttribute('text-anchor','end');label.setAttribute('font-size','12');label.setAttribute('fill','#1f2937');label.textContent=name;svg.appendChild(label);const guide=document.createElementNS('http://www.w3.org/2000/svg','line');guide.setAttribute('x1',String(leftPad));guide.setAttribute('y1',String(y));guide.setAttribute('x2',String(svgWidth-12));guide.setAttribute('y2',String(y));guide.setAttribute('stroke','#eef2f7');guide.setAttribute('stroke-width','1');svg.appendChild(guide);});const minLabel=document.createElementNS('http://www.w3.org/2000/svg','text');minLabel.setAttribute('x',String(leftPad));minLabel.setAttribute('y',String(svgHeight-8));minLabel.setAttribute('font-size','11');minLabel.setAttribute('fill','#6b7280');minLabel.textContent=`seq ${view.minSeq}`;svg.appendChild(minLabel);const maxLabel=document.createElementNS('http://www.w3.org/2000/svg','text');maxLabel.setAttribute('x',String(svgWidth-12));maxLabel.setAttribute('y',String(svgHeight-8));maxLabel.setAttribute('text-anchor','end');maxLabel.setAttribute('font-size','11');maxLabel.setAttribute('fill','#6b7280');maxLabel.textContent=`seq ${view.maxSeq}`;svg.appendChild(maxLabel);view.samples.forEach((sample)=>{const rowIndex=view.topIndex.get(sample.top);const x=leftPad+(seqSpan===0?0:((sample.seq-view.minSeq)/seqSpan)*innerWidth);const y=topPad+rowIndex*rowHeight+rowHeight/2;const dot=document.createElementNS('http://www.w3.org/2000/svg','circle');dot.setAttribute('cx',String(x));dot.setAttribute('cy',String(y));dot.setAttribute('r','3.5');dot.setAttribute('fill',colorFor(sample.insnDelta,view.maxInsn));dot.addEventListener('mousemove',(event)=>{const eventRows=formatEventRows(sample);showTooltip(event,`<strong>${escapeHtml(sample.top)}</strong><br>seq: ${sample.seq}<br>pid: ${sample.pid}<br>tid: ${sample.tid}<br>insn_delta: ${sample.insnDelta}${eventRows?`<br>${eventRows}`:''}`);});dot.addEventListener('mouseleave',hideTooltip);svg.appendChild(dot);});frame.appendChild(svg);const note=document.createElement('div');note.className='small-note';note.textContent='每个点对应一个 sample，横轴直接使用 raw 中的 seq，不做窗口聚合。';frame.appendChild(note);}\n"
+		"function renderSeriesChart(parent,title,samples,color,getValue){const card=document.createElement('div');const heading=document.createElement('div');heading.className='chart-title';heading.textContent=title;card.appendChild(heading);if(samples.length===0){const empty=document.createElement('div');empty.className='empty';empty.textContent='没有可展示的数据。';card.appendChild(empty);parent.appendChild(card);return;}const minSeq=samples[0].seq;const maxSeq=samples[samples.length-1].seq;const seqSpan=Math.max(1,maxSeq-minSeq);const values=samples.map(getValue);const maxValue=Math.max(1,...values);const left=48;const top=16;const innerWidth=Math.max(900,seqSpan*10);const width=left+innerWidth+18;const height=180;const innerHeight=height-top-28;const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('width',String(width));svg.setAttribute('height',String(height));svg.setAttribute('viewBox',`0 0 ${width} ${height}`);const axis=document.createElementNS('http://www.w3.org/2000/svg','line');axis.setAttribute('x1',String(left));axis.setAttribute('y1',String(top+innerHeight));axis.setAttribute('x2',String(width-12));axis.setAttribute('y2',String(top+innerHeight));axis.setAttribute('stroke','#cbd5e1');axis.setAttribute('stroke-width','1');svg.appendChild(axis);const points=samples.map((sample)=>{const x=left+(seqSpan===0?0:((sample.seq-minSeq)/seqSpan)*innerWidth);const value=getValue(sample);const y=top+innerHeight-(value/maxValue)*innerHeight;return {x,y,value,seq:sample.seq};});const polyline=document.createElementNS('http://www.w3.org/2000/svg','polyline');polyline.setAttribute('fill','none');polyline.setAttribute('stroke',color);polyline.setAttribute('stroke-width','2.5');polyline.setAttribute('points',points.map((point)=>`${point.x},${point.y}`).join(' '));svg.appendChild(polyline);points.forEach((point)=>{const dot=document.createElementNS('http://www.w3.org/2000/svg','circle');dot.setAttribute('cx',String(point.x));dot.setAttribute('cy',String(point.y));dot.setAttribute('r','3');dot.setAttribute('fill',color);dot.addEventListener('mousemove',(event)=>showTooltip(event,`<strong>${escapeHtml(title)}</strong><br>seq: ${point.seq}<br>值: ${point.value}`));dot.addEventListener('mouseleave',hideTooltip);svg.appendChild(dot);});const maxLabel=document.createElementNS('http://www.w3.org/2000/svg','text');maxLabel.setAttribute('x','6');maxLabel.setAttribute('y',String(top+12));maxLabel.setAttribute('font-size','11');maxLabel.setAttribute('fill','#6b7280');maxLabel.textContent=String(maxValue);svg.appendChild(maxLabel);const minLabel=document.createElementNS('http://www.w3.org/2000/svg','text');minLabel.setAttribute('x',String(left));minLabel.setAttribute('y',String(height-6));minLabel.setAttribute('font-size','11');minLabel.setAttribute('fill','#6b7280');minLabel.textContent=`seq ${minSeq}`;svg.appendChild(minLabel);const maxSeqLabel=document.createElementNS('http://www.w3.org/2000/svg','text');maxSeqLabel.setAttribute('x',String(width-12));maxSeqLabel.setAttribute('y',String(height-6));maxSeqLabel.setAttribute('text-anchor','end');maxSeqLabel.setAttribute('font-size','11');maxSeqLabel.setAttribute('fill','#6b7280');maxSeqLabel.textContent=`seq ${maxSeq}`;svg.appendChild(maxSeqLabel);const frame=document.createElement('div');frame.className='chart-frame';frame.appendChild(svg);card.appendChild(frame);parent.appendChild(card);}\n"
+		"function renderTrends(view){const grid=document.getElementById('trend-grid');grid.innerHTML='';renderSeriesChart(grid,'insn_delta 逐 Sample 折线',view.samples,'#2563eb',(sample)=>sample.insnDelta);const palette=['#b91c1c','#7c3aed','#0f766e','#ea580c','#0891b2','#65a30d','#be185d'];reportData.eventNames.forEach((name,index)=>{renderSeriesChart(grid,`${name} 逐 Sample 折线`,view.samples,palette[index%palette.length],(sample)=>sample.events[index]);});}\n"
+		"function updateView(){const filtered=getFilteredSamples();const view=computeView(filtered);renderSummary(view);renderSampleSequence(view);renderTrends(view);}renderTidSelect();updateView();\n"
 		"</script>\n"
 		"</body>\n"
 		"</html>\n");
@@ -1334,7 +1330,7 @@ static int run_visual_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 		return -errno;
 	}
 
-	err = write_visual_html(out, rows, count, schema, opts);
+	err = write_visual_html(out, rows, count, schema);
 	if (fclose(out) != 0 && err == 0)
 		err = -EIO;
 	free(rows);

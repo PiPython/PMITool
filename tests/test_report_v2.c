@@ -45,10 +45,12 @@ int main(void)
 	char *samples_argv[] = { "report", "-i", input_path, "-m", "samples",
 				 "-t", "202", NULL };
 	char *visual_argv[] = { "report", "-i", input_path, "-m", "visual",
-				"-o", output_visual_path, "-w", "2", "-l", "2",
-				"-t", "202", NULL };
+				"-o", output_visual_path, "-l", "2", "-t",
+				"202", NULL };
 	char *visual_bad_argv[] = { "report", "-i", input_path, "-m", "visual",
 				    NULL };
+	char *visual_window_argv[] = { "report", "-i", input_path, "-m", "visual",
+				       "-o", output_visual_path, "-w", "2", NULL };
 	FILE *fp;
 	int input_fd;
 	int output_fd;
@@ -168,7 +170,7 @@ int main(void)
 	CHECK(visual_output_fd >= 0);
 	close(visual_output_fd);
 
-	err = pmi_report_main(13, visual_argv);
+	err = pmi_report_main(11, visual_argv);
 	CHECK(err == 0);
 
 	fp = fopen(output_visual_path, "r");
@@ -180,14 +182,18 @@ int main(void)
 
 	CHECK(strstr(visual_output, "<!doctype html>") != NULL);
 	CHECK(strstr(visual_output, "const reportData =") != NULL);
-	CHECK(strstr(visual_output, "windowSamples: 2") != NULL);
 	CHECK(strstr(visual_output, "tid-select") != NULL);
-	CHECK(strstr(visual_output, "热点函数 × 窗口") != NULL);
-	CHECK(strstr(visual_output, "总 sample 数趋势") != NULL);
+	CHECK(strstr(visual_output, "按 Sample 序号的全量时序图") != NULL);
+	CHECK(strstr(visual_output, "insn_delta 逐 Sample 折线") != NULL);
+	CHECK(strstr(visual_output, "\"r0010\"") != NULL);
+	CHECK(strstr(visual_output, "\"r0011\"") != NULL);
 	CHECK(strstr(visual_output, "foo::bar(int)") != NULL);
 	CHECK(strstr(visual_output, mangled_top) == NULL);
 	CHECK(strstr(visual_output, long_top_field) == NULL);
 	CHECK(strstr(visual_output, stack_field) == NULL);
+	CHECK(strstr(visual_output, "windowSamples") == NULL);
+	CHECK(strstr(visual_output, "热点函数 × 窗口") == NULL);
+	CHECK(strstr(visual_output, "总 sample 数趋势") == NULL);
 
 	saved_stderr = dup(STDERR_FILENO);
 	CHECK(saved_stderr >= 0);
@@ -196,6 +202,17 @@ int main(void)
 	CHECK(dup2(visual_output_fd, STDERR_FILENO) >= 0);
 	close(visual_output_fd);
 	err = pmi_report_main(5, visual_bad_argv);
+	CHECK(dup2(saved_stderr, STDERR_FILENO) >= 0);
+	close(saved_stderr);
+	CHECK(err == 1);
+
+	saved_stderr = dup(STDERR_FILENO);
+	CHECK(saved_stderr >= 0);
+	visual_output_fd = open("/dev/null", O_WRONLY);
+	CHECK(visual_output_fd >= 0);
+	CHECK(dup2(visual_output_fd, STDERR_FILENO) >= 0);
+	close(visual_output_fd);
+	err = pmi_report_main(9, visual_window_argv);
 	CHECK(dup2(saved_stderr, STDERR_FILENO) >= 0);
 	close(saved_stderr);
 	CHECK(err == 1);

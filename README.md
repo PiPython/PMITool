@@ -95,7 +95,7 @@ sudo ./build/pmi record -c './bench' --write-mode strict -o samples.pmi
 生成时序热点可视化 HTML：
 
 ```bash
-./build/pmi report -i samples.pmi -m visual -o visual.html -w 200 -l 20
+./build/pmi report -i samples.pmi -m visual -o visual.html
 ```
 
 按一个或多个 tid 过滤报表：
@@ -111,7 +111,7 @@ sudo ./build/pmi record -c './bench' --write-mode strict -o samples.pmi
 若符号名是 C++ mangled 名称，`report` 会在展示阶段自动做 demangle。
 `report` 输出是对齐的人类可读表格；过长的 `top` 和 `stack` 字段会截断为 `...`，
 以保证终端可读性。
-`-m visual` 会生成单文件离线 HTML，以采样序号窗口为横轴展示热点函数变化；
+`-m visual` 会生成单文件离线 HTML，直接以 sample 序号 `seq` 为横轴展示全量时序图；
 这里的“时间变化”严格表示“随采样序号推进的变化”，不是 wall-clock 时间。
 `record` 热路径不会做符号化；raw 文件中的 `top` 和 `stack` 只保存地址，
 人类可读函数名全部由 `report` 离线解析。
