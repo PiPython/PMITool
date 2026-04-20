@@ -36,6 +36,7 @@ struct pmi_format_field {
 	size_t nranges;
 };
 
+/* sysfs 解析尽量只读第一行，既简单也足够覆盖 perf PMU 的 type/format/events 文件。 */
 static int read_first_line(const char *path, char *buf, size_t cap)
 {
 	FILE *fp;
@@ -88,6 +89,9 @@ static int cpu_pmu_priority(const char *name)
 	return -1;
 }
 
+/* raw event 只允许绑定真实 CPU core PMU。
+ * 这里按 cpu / armv8_pmuv3* / armv9_pmuv3* 的优先级挑出唯一候选。
+ */
 static int detect_cpu_pmu(struct pmi_event_list *list, char *pmu, size_t pmu_cap)
 {
 	DIR *dir;
@@ -142,6 +146,7 @@ static int detect_cpu_pmu(struct pmi_event_list *list, char *pmu, size_t pmu_cap
 	return 0;
 }
 
+/* record 的 CLI 约定是 r0010 这种形式，这里只负责把 token 转成纯十六进制事件号。 */
 static int parse_raw_token(const char *token, uint64_t *code)
 {
 	const char *cursor;
@@ -180,6 +185,9 @@ static int read_pmu_type(const char *sysfs_root, const char *pmu, uint32_t *type
 	return 0;
 }
 
+/* format/event 这类 sysfs 描述会把一个逻辑字段拆成多个 bit range，
+ * 先解析结构，再由 apply_format_value() 映射到 config/config1/config2。
+ */
 static int parse_format_field(const char *spec, struct pmi_format_field *field)
 {
 	char copy[256];
@@ -256,6 +264,7 @@ static void apply_format_value(struct pmi_event_spec *spec,
 	}
 }
 
+/* 把类似 event=0x10 这样的项翻译成 perf_event_attr 里的 config/config1/config2。 */
 static int apply_term(struct pmi_event_spec *spec, const char *sysfs_root,
 		      const char *pmu, char *term)
 {

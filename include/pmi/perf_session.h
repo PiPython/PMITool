@@ -10,6 +10,11 @@
 #include "pmi/record.h"
 #include "pmi/shared.h"
 
+/* 一条 perf sample 解码后的统一表示：
+ * - events 保存 perf group 的累计值
+ * - event_deltas 保存相邻样本差值，供 output 直接落盘
+ * - callchain 只在 full stack 模式下填充
+ */
 struct pmi_perf_sample {
 	uint64_t time_ns;
 	uint64_t stream_id;
@@ -27,6 +32,7 @@ struct pmi_perf_sample {
 	unsigned int lost_flags;
 };
 
+/* 用于 debug empty-drain 时同步 read() leader_fd 的整组计数快照。 */
 struct pmi_perf_group_snapshot {
 	struct pmi_event_value events[PMI_MAX_EVENTS];
 	size_t event_count;
@@ -40,6 +46,7 @@ struct pmi_opened_event {
 	uint64_t config;
 };
 
+/* 一个 tid 对应一个 perf session，封装 leader/group fd、mmap ring 和诊断状态。 */
 struct pmi_perf_session {
 	pid_t tid;
 	int leader_fd;

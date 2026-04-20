@@ -69,6 +69,7 @@ static void strip_symbol_offset(const char *raw, char *base, size_t base_cap)
 		*plus = '\0';
 }
 
+/* 只解析函数符号，避免把无关 ELF 内容塞进缓存；report 需要的是函数归因，不是完整反汇编。 */
 static int parse_symbols(struct pmi_module_cache *cache, const void *image, size_t len)
 {
 	const Elf64_Ehdr *ehdr = image;
@@ -178,6 +179,7 @@ static struct pmi_module_cache *load_module(struct pmi_symbolizer *symbolizer,
 	if (cache)
 		return cache;
 
+	/* 模块缓存是 report 性能的关键：同一个 so/exe 只解析一次 ELF 符号表。 */
 	if (symbolizer->count == symbolizer->cap) {
 		size_t new_cap = symbolizer->cap ? symbolizer->cap * 2 : 16;
 		struct pmi_module_cache *tmp;
@@ -267,6 +269,7 @@ static int resolve_module(pid_t pid, uint64_t ip, char *module, size_t module_ca
 	return -ENOENT;
 }
 
+/* 按最近且不超过 rel_ip 的函数符号归因，最终展示成 name+offset。 */
 static int lookup_symbol(struct pmi_module_cache *cache, uint64_t rel_ip,
 			 char *symbol, size_t cap)
 {
@@ -286,6 +289,7 @@ static int lookup_symbol(struct pmi_module_cache *cache, uint64_t rel_ip,
 	return 0;
 }
 
+/* demangle 只在 report 侧 best-effort 启用，缺库时静默回退到原名。 */
 static void maybe_init_demangler(struct pmi_symbolizer *symbolizer)
 {
 	static const char *const libs[] = {
@@ -406,6 +410,7 @@ int pmi_symbolizer_symbolize_ip(struct pmi_symbolizer *symbolizer, pid_t pid,
 
 	err = resolve_module(pid, ip, module, module_cap, &relative_ip);
 	if (err) {
+		/* 找不到模块时保留原始地址，保证 report 仍然可用且不丢样本。 */
 		pmi_copy_cstr_trunc(module, module_cap, "[unknown]");
 		snprintf(symbol, symbol_cap, "0x%" PRIx64, ip);
 		return err;
@@ -424,6 +429,7 @@ int pmi_symbolizer_symbolize_ip(struct pmi_symbolizer *symbolizer, pid_t pid,
 	return 0;
 }
 
+/* folded stack 统一按“根 -> 叶”顺序拼接，便于后续按整条栈聚合。 */
 int pmi_symbolizer_symbolize_stack(struct pmi_symbolizer *symbolizer, pid_t pid,
 				   const uint64_t *ips, size_t depth,
 				   char *folded, size_t folded_cap)
@@ -455,6 +461,7 @@ int pmi_symbolizer_symbolize_stack(struct pmi_symbolizer *symbolizer, pid_t pid,
 	return 0;
 }
 
+/* pretty_name 只负责可读性，不改变“按符号归因”的基本逻辑。 */
 int pmi_symbolizer_pretty_name(struct pmi_symbolizer *symbolizer,
 			       const char *raw, char *pretty,
 			       size_t pretty_cap)

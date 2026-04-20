@@ -7,6 +7,7 @@
 
 struct pmi_symbolizer;
 
+/* symbolizer 只在 report 离线阶段使用；record 热路径不做符号化。 */
 int pmi_symbolizer_init(struct pmi_symbolizer **symbolizer);
 void pmi_symbolizer_destroy(struct pmi_symbolizer *symbolizer);
 int pmi_symbolizer_symbolize_ip(struct pmi_symbolizer *symbolizer, pid_t pid,

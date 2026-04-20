@@ -16,6 +16,7 @@
 #define PMI_REPORT_TOP_DISPLAY_WIDTH 48
 #define PMI_REPORT_STACK_DISPLAY_WIDTH 96
 
+/* report 内部先把 raw 样本收敛成统一行结构，再复用到 overview/samples/visual 三种输出。 */
 struct sample_row {
 	uint64_t seq;
 	uint64_t insn_delta;
@@ -27,6 +28,7 @@ struct sample_row {
 	char stack[PMI_MAX_STACK_TEXT_LEN];
 };
 
+/* 表格模式使用两遍扫描：先统计列宽，再按统一布局输出。 */
 struct table_layout {
 	size_t seq_w;
 	size_t pid_w;
@@ -38,11 +40,13 @@ struct table_layout {
 	size_t stack_w;
 };
 
+/* raw v3 的 schema 是“固定前后列 + 中间动态事件列”，这里保存动态事件列定义。 */
 struct report_schema {
 	char event_names[PMI_MAX_EVENTS - 1][PMI_MAX_EVENT_NAME];
 	size_t event_count;
 };
 
+/* overview 的聚合单元是按 top 合并后的热点函数。 */
 struct report_entry {
 	char top[PMI_MAX_SYMBOL_LEN];
 	size_t sample_count;
@@ -50,6 +54,7 @@ struct report_entry {
 	uint64_t event_totals[PMI_MAX_EVENTS - 1];
 };
 
+/* full stacks 小节按整条 folded stack 聚合。 */
 struct stack_entry {
 	char stack[PMI_MAX_STACK_TEXT_LEN];
 	size_t sample_count;
@@ -57,6 +62,7 @@ struct stack_entry {
 	uint64_t event_totals[PMI_MAX_EVENTS - 1];
 };
 
+/* parsed_sample 保留的是刚从 raw 行解析出来的原始语义；后续还会做符号化和 prettify。 */
 struct parsed_sample {
 	uint64_t seq;
 	uint64_t insn_delta;
@@ -288,6 +294,7 @@ static void resolve_top_text(struct pmi_symbolizer *symbolizer, pid_t pid,
 	if (!resolved || resolved_cap == 0)
 		return;
 
+	/* record 落盘时 top 可能是地址，也可能已经是文本；report 统一在这里收敛成可读名字。 */
 	if (!raw_top || raw_top[0] == '\0' || strcmp(raw_top, "-") == 0) {
 		pmi_copy_cstr_trunc(resolved, resolved_cap, "-");
 		return;
@@ -317,6 +324,7 @@ static int append_stack_symbol(char *dst, size_t cap, const char *symbol)
 	return 0;
 }
 
+/* raw 里的 stack 仍然是地址列表；report 在这里把它离线翻译成 folded stack 文本。 */
 static int build_symbolized_stack(struct pmi_symbolizer *symbolizer, pid_t pid,
 				  const char *top, const char *raw_stack, char *out,
 				  size_t out_cap)
@@ -441,6 +449,7 @@ static int parse_report_options(int argc, char **argv, struct pmi_report_options
 	int opt;
 
 	memset(opts, 0, sizeof(*opts));
+	/* 文本报表和 visual 共用同一套参数结构，mode 决定最终输出分支。 */
 	opts->limit = 20;
 	opts->window_samples = 200;
 	opts->mode = PMI_REPORT_OVERVIEW;
@@ -520,6 +529,7 @@ static int parse_report_options(int argc, char **argv, struct pmi_report_options
 	return 0;
 }
 
+/* raw v3 的解析由表头驱动，而不是写死事件列数量。 */
 static int parse_tsv_fields(char *line, char **fields, size_t cap, size_t *count)
 {
 	char *cursor = line;
@@ -559,6 +569,7 @@ static int parse_header_line(char *line, struct report_schema *schema)
 	    strcmp(fields[field_count - 1], "stack") != 0)
 		return -EINVAL;
 
+	/* 中间所有列都被视为动态事件列，列头来自 record 阶段的 -e 输入顺序。 */
 	memset(schema, 0, sizeof(*schema));
 	schema->event_count = field_count - 7;
 	for (i = 0; i < schema->event_count; ++i) {
@@ -570,6 +581,7 @@ static int parse_header_line(char *line, struct report_schema *schema)
 	return 0;
 }
 
+/* sample 行解析只负责结构化，不负责符号化和 prettify。 */
 static int parse_sample_line(char *line, const struct report_schema *schema,
 			     struct parsed_sample *sample)
 {
@@ -774,6 +786,9 @@ static int collect_symbolized_samples(FILE *fp, struct pmi_symbolizer *symbolize
 		if (!is_tid_selected(opts, sample.tid))
 			continue;
 
+		/* report 把 top=0x... 和 stack 地址都在离线阶段翻成可读函数名，
+		 * 这样 record 热路径就不用承担任何符号化成本。
+		 */
 		resolve_top_text(symbolizer, sample.pid, sample.top, resolved_top,
 				 sizeof(resolved_top));
 		if (include_stack && strcmp(sample.stack, "-") != 0) {
@@ -1072,6 +1087,7 @@ static void print_stack_row(const struct stack_entry *entry,
 	putchar('\n');
 }
 
+/* samples 模式按样本顺序直出，因此会先把过滤后的样本全部收集起来，再统一计算列宽。 */
 static int run_samples_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 			      const struct pmi_report_options *opts,
 			      const struct report_schema *schema)
@@ -1097,6 +1113,7 @@ static int run_samples_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 	return err;
 }
 
+/* overview 模式一边扫描一边聚合，最终输出函数热点榜和可选的 full stacks 小节。 */
 static int run_overview_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 			       const struct pmi_report_options *opts,
 			       const struct report_schema *schema)
@@ -1190,6 +1207,9 @@ out:
 	return err;
 }
 
+/* visual 不是逐 sample 调试器，而是“阶段热条图 + 阶段热点榜”。
+ * 这里直接把离线符号化后的样本和 schema 打包进单文件 HTML，前端只做轻量聚合。
+ */
 static int write_visual_html(FILE *out, const struct sample_row *rows, size_t count,
 			     const struct report_schema *schema)
 {
@@ -1328,6 +1348,7 @@ static int write_visual_html(FILE *out, const struct sample_row *rows, size_t co
 	return err;
 }
 
+/* visual 复用 collect_symbolized_samples，保证文本报表和 HTML 使用同一套离线符号化结果。 */
 static int run_visual_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 			     const struct pmi_report_options *opts,
 			     const struct report_schema *schema)

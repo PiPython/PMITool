@@ -13,6 +13,7 @@ enum pmi_write_mode {
 	PMI_WRITE_STRICT = 1,
 };
 
+/* record 侧只保留真正影响采样行为的选项，符号化等重活统一放到 report。 */
 struct pmi_record_options {
 	pid_t pid;
 	pid_t tid;
@@ -29,6 +30,7 @@ struct pmi_record_options {
 	size_t raw_event_count;
 };
 
+/* report 侧既承担文本报表，也承担 visual HTML 的离线生成。 */
 struct pmi_report_options {
 	const char *input_path;
 	const char *output_path;
