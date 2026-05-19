@@ -7,10 +7,12 @@ CC ?= clang
 CC_IS_GCC := $(shell printf '' | $(CC) -dM -E - 2>/dev/null | awk '/__GNUC__/ { gcc = 1 } /__clang__/ { clang = 1 } END { print (gcc && !clang) ? 1 : 0 }')
 
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror -std=c11
+CFLAGS += -pthread
 ifeq ($(CC_IS_GCC),1)
 CFLAGS += -Wno-format-truncation
 endif
 CPPFLAGS += -Iinclude -D_GNU_SOURCE
+LDFLAGS += -pthread
 LDLIBS += -ldl
 
 SRC := \
@@ -39,7 +41,7 @@ TEST_BIN := $(patsubst tests/%.c,$(BUILD_DIR)/%,$(TEST_SRC))
 all: $(BIN)
 
 $(BIN): $(OBJ) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(OBJ) $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) $(OBJ) $(LDFLAGS) $(LDLIBS) -o $@
 
 $(OBJ_DIR)/%.o: src/%.c | $(OBJ_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -51,7 +53,7 @@ $(OBJ_DIR):
 	mkdir -p $@
 
 $(BUILD_DIR)/test_%: tests/test_%.c $(filter-out $(OBJ_DIR)/main.o,$(OBJ)) | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(filter-out $(OBJ_DIR)/main.o,$(OBJ)) $(LDFLAGS) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(filter-out $(OBJ_DIR)/main.o,$(OBJ)) $(LDFLAGS) $(LDLIBS) -o $@
 
 test: $(TEST_BIN)
 	@set -e; \

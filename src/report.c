@@ -276,6 +276,29 @@ static void resolve_symbol_or_hex(struct pmi_symbolizer *symbolizer, pid_t pid,
 		prettify_symbol(symbolizer, symbol, symbol_cap);
 }
 
+static void resolve_top_text(struct pmi_symbolizer *symbolizer, pid_t pid,
+			     const char *raw_top, char *resolved,
+			     size_t resolved_cap)
+{
+	uint64_t ip;
+
+	if (!resolved || resolved_cap == 0)
+		return;
+
+	if (!raw_top || raw_top[0] == '\0' || strcmp(raw_top, "-") == 0) {
+		pmi_copy_cstr_trunc(resolved, resolved_cap, "-");
+		return;
+	}
+	if (strncmp(raw_top, "0x", 2) == 0) {
+		ip = strtoull(raw_top, NULL, 0);
+		resolve_symbol_or_hex(symbolizer, pid, ip, resolved, resolved_cap);
+		return;
+	}
+
+	pmi_copy_cstr_trunc(resolved, resolved_cap, raw_top);
+	prettify_symbol(symbolizer, resolved, resolved_cap);
+}
+
 static int append_stack_symbol(char *dst, size_t cap, const char *symbol)
 {
 	size_t len;
@@ -296,7 +319,7 @@ static int build_symbolized_stack(struct pmi_symbolizer *symbolizer, pid_t pid,
 				  size_t out_cap)
 {
 	char stack_copy[PMI_MAX_STACK_TEXT_LEN];
-	char pretty_top[PMI_MAX_SYMBOL_LEN];
+	char resolved_top[PMI_MAX_SYMBOL_LEN];
 	char *token;
 	char *saveptr = NULL;
 
@@ -305,9 +328,9 @@ static int build_symbolized_stack(struct pmi_symbolizer *symbolizer, pid_t pid,
 
 	out[0] = '\0';
 	if (has_symbol_text(top)) {
-		pmi_copy_cstr_trunc(pretty_top, sizeof(pretty_top), top);
-		prettify_symbol(symbolizer, pretty_top, sizeof(pretty_top));
-		pmi_copy_cstr_trunc(out, out_cap, pretty_top);
+		resolve_top_text(symbolizer, pid, top, resolved_top,
+				 sizeof(resolved_top));
+		pmi_copy_cstr_trunc(out, out_cap, resolved_top);
 	}
 	if (!raw_stack || strcmp(raw_stack, "-") == 0)
 		return 0;
@@ -912,6 +935,7 @@ static int run_samples_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 
 	while (fgets(line, sizeof(line), fp)) {
 		struct parsed_sample sample;
+		char resolved_top[PMI_MAX_SYMBOL_LEN];
 		char symbolized_stack[PMI_MAX_STACK_TEXT_LEN];
 
 		err = parse_sample_line(line, schema, &sample);
@@ -922,17 +946,18 @@ static int run_samples_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 		if (!is_tid_selected(opts, sample.tid))
 			continue;
 
-		prettify_symbol(symbolizer, sample.top, sizeof(sample.top));
+		resolve_top_text(symbolizer, sample.pid, sample.top, resolved_top,
+				 sizeof(resolved_top));
 		if (strcmp(sample.stack, "-") == 0) {
 			pmi_copy_cstr_trunc(symbolized_stack, sizeof(symbolized_stack),
 					    "-");
 		} else {
-			build_symbolized_stack(symbolizer, sample.pid, sample.top,
+			build_symbolized_stack(symbolizer, sample.pid, resolved_top,
 					       sample.stack, symbolized_stack,
 					       sizeof(symbolized_stack));
 		}
 
-		err = append_sample_row(&rows, &count, &cap, &sample, sample.top,
+		err = append_sample_row(&rows, &count, &cap, &sample, resolved_top,
 					symbolized_stack);
 		if (err)
 			goto out;
@@ -968,6 +993,7 @@ static int run_overview_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 
 	while (fgets(line, sizeof(line), fp)) {
 		struct parsed_sample sample;
+		char resolved_top[PMI_MAX_SYMBOL_LEN];
 		struct report_entry *entry;
 		size_t j;
 
@@ -979,8 +1005,9 @@ static int run_overview_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 		if (!is_tid_selected(opts, sample.tid))
 			continue;
 
-		prettify_symbol(symbolizer, sample.top, sizeof(sample.top));
-		entry = find_or_add_report_entry(&entries, &count, &cap, sample.top);
+		resolve_top_text(symbolizer, sample.pid, sample.top, resolved_top,
+				 sizeof(resolved_top));
+		entry = find_or_add_report_entry(&entries, &count, &cap, resolved_top);
 		if (!entry) {
 			err = -ENOMEM;
 			goto out;
@@ -994,7 +1021,7 @@ static int run_overview_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 			struct stack_entry *stack_entry;
 			char folded_stack[PMI_MAX_STACK_TEXT_LEN];
 
-			build_symbolized_stack(symbolizer, sample.pid, sample.top,
+			build_symbolized_stack(symbolizer, sample.pid, resolved_top,
 					       sample.stack, folded_stack,
 					       sizeof(folded_stack));
 			if (folded_stack[0] == '\0')

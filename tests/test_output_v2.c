@@ -3,7 +3,9 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "pmi/event.h"
 #include "pmi/output.h"
+#include "pmi/record.h"
 
 #define CHECK(cond)                                                             \
 	do {                                                                    \
@@ -36,12 +38,12 @@ int main(void)
 	char path[] = "/tmp/pmi-output-v3-XXXXXX";
 	char no_event_path[] = "/tmp/pmi-output-v3-no-events-XXXXXX";
 	struct pmi_output_writer writer;
-	struct pmi_event_list event_list;
-	struct pmi_perf_sample sample1;
-	struct pmi_perf_sample sample2;
-	struct pmi_perf_sample sample3;
 	struct pmi_output_writer no_event_writer;
-	struct pmi_perf_sample no_event_sample;
+	struct pmi_event_list event_list;
+	struct pmi_output_sample sample1;
+	struct pmi_output_sample sample2;
+	struct pmi_output_sample sample3;
+	struct pmi_output_sample no_event_sample;
 	FILE *fp;
 	char header[64];
 	char columns[256];
@@ -62,45 +64,42 @@ int main(void)
 	memset(&sample1, 0, sizeof(sample1));
 	sample1.pid = 11;
 	sample1.tid = 22;
+	sample1.top_ip = 0x1234;
+	sample1.stack_depth = 2;
+	sample1.stack_ips[0] = 0x2234;
+	sample1.stack_ips[1] = 0x3234;
 	sample1.event_count = 3;
-	sample1.events[0].value = 1000000;
-	sample1.events[1].value = 7;
-	sample1.events[2].value = 9;
-	strcpy(sample1.event_names[0], "instructions");
-	strcpy(sample1.event_names[1], "r0010");
-	strcpy(sample1.event_names[2], "r0011");
+	sample1.event_deltas[0] = 1000000;
+	sample1.event_deltas[1] = 7;
+	sample1.event_deltas[2] = 9;
 
 	memset(&sample2, 0, sizeof(sample2));
 	sample2.pid = 11;
 	sample2.tid = 22;
+	sample2.top_ip = 0x1334;
 	sample2.event_count = 3;
-	sample2.events[0].value = 1000100;
-	sample2.events[1].value = 10;
-	sample2.events[2].value = 15;
-	strcpy(sample2.event_names[0], "instructions");
-	strcpy(sample2.event_names[1], "r0010");
-	strcpy(sample2.event_names[2], "r0011");
+	sample2.event_deltas[0] = 100;
+	sample2.event_deltas[1] = 3;
+	sample2.event_deltas[2] = 6;
 
 	memset(&sample3, 0, sizeof(sample3));
 	sample3.pid = 11;
 	sample3.tid = 33;
 	sample3.event_count = 3;
-	sample3.events[0].value = 500;
-	sample3.events[1].value = 2;
-	sample3.events[2].value = 4;
-	strcpy(sample3.event_names[0], "instructions");
-	strcpy(sample3.event_names[1], "r0010");
-	strcpy(sample3.event_names[2], "r0011");
+	sample3.event_deltas[0] = 500;
+	sample3.event_deltas[1] = 2;
+	sample3.event_deltas[2] = 4;
 
-	err = pmi_output_open(&writer, path, &event_list);
+	err = pmi_output_open(&writer, path, &event_list, PMI_WRITE_STRICT, false);
 	CHECK(err == 0);
-	err = pmi_output_write_sample(&writer, &sample1, "hot_func", "0x2345");
+	err = pmi_output_enqueue_sample(&writer, &sample1);
 	CHECK(err == 0);
-	err = pmi_output_write_sample(&writer, &sample2, "hot_func", "0x3345");
+	err = pmi_output_enqueue_sample(&writer, &sample2);
 	CHECK(err == 0);
-	err = pmi_output_write_sample(&writer, &sample3, "other_func", "-");
+	err = pmi_output_enqueue_sample(&writer, &sample3);
 	CHECK(err == 0);
-	pmi_output_close(&writer);
+	err = pmi_output_close(&writer);
+	CHECK(err == 0);
 
 	fp = fopen(path, "r");
 	CHECK(fp != NULL);
@@ -117,6 +116,7 @@ int main(void)
 	CHECK(strcmp(next_field(&cursor), "r0011") == 0);
 	CHECK(strcmp(next_field(&cursor), "top") == 0);
 	CHECK(strcmp(next_field(&cursor), "stack") == 0);
+
 	CHECK(fgets(line, sizeof(line), fp) != NULL);
 	cursor = line;
 	CHECK(strcmp(next_field(&cursor), "S") == 0);
@@ -126,8 +126,9 @@ int main(void)
 	CHECK(strcmp(next_field(&cursor), "22") == 0);
 	CHECK(strcmp(next_field(&cursor), "7") == 0);
 	CHECK(strcmp(next_field(&cursor), "9") == 0);
-	CHECK(strcmp(next_field(&cursor), "hot_func") == 0);
-	CHECK(strcmp(next_field(&cursor), "0x2345") == 0);
+	CHECK(strcmp(next_field(&cursor), "0x1234") == 0);
+	CHECK(strcmp(next_field(&cursor), "0x2234;0x3234") == 0);
+
 	CHECK(fgets(line, sizeof(line), fp) != NULL);
 	cursor = line;
 	CHECK(strcmp(next_field(&cursor), "S") == 0);
@@ -137,8 +138,9 @@ int main(void)
 	CHECK(strcmp(next_field(&cursor), "22") == 0);
 	CHECK(strcmp(next_field(&cursor), "3") == 0);
 	CHECK(strcmp(next_field(&cursor), "6") == 0);
-	CHECK(strcmp(next_field(&cursor), "hot_func") == 0);
-	CHECK(strcmp(next_field(&cursor), "0x3345") == 0);
+	CHECK(strcmp(next_field(&cursor), "0x1334") == 0);
+	CHECK(strcmp(next_field(&cursor), "-") == 0);
+
 	CHECK(fgets(line, sizeof(line), fp) != NULL);
 	cursor = line;
 	CHECK(strcmp(next_field(&cursor), "S") == 0);
@@ -148,7 +150,7 @@ int main(void)
 	CHECK(strcmp(next_field(&cursor), "33") == 0);
 	CHECK(strcmp(next_field(&cursor), "2") == 0);
 	CHECK(strcmp(next_field(&cursor), "4") == 0);
-	CHECK(strcmp(next_field(&cursor), "other_func") == 0);
+	CHECK(strcmp(next_field(&cursor), "-") == 0);
 	CHECK(strcmp(next_field(&cursor), "-") == 0);
 	fclose(fp);
 	unlink(path);
@@ -161,14 +163,15 @@ int main(void)
 	no_event_sample.pid = 99;
 	no_event_sample.tid = 99;
 	no_event_sample.event_count = 1;
-	no_event_sample.events[0].value = 42;
-	strcpy(no_event_sample.event_names[0], "instructions");
+	no_event_sample.event_deltas[0] = 42;
 
-	err = pmi_output_open(&no_event_writer, no_event_path, NULL);
+	err = pmi_output_open(&no_event_writer, no_event_path, NULL,
+			      PMI_WRITE_STRICT, false);
 	CHECK(err == 0);
-	err = pmi_output_write_sample(&no_event_writer, &no_event_sample, "-", "-");
+	err = pmi_output_enqueue_sample(&no_event_writer, &no_event_sample);
 	CHECK(err == 0);
-	pmi_output_close(&no_event_writer);
+	err = pmi_output_close(&no_event_writer);
+	CHECK(err == 0);
 
 	fp = fopen(no_event_path, "r");
 	CHECK(fp != NULL);

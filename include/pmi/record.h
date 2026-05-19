@@ -8,6 +8,11 @@
 
 #include "pmi/shared.h"
 
+enum pmi_write_mode {
+	PMI_WRITE_LOW_OVERHEAD = 0,
+	PMI_WRITE_STRICT = 1,
+};
+
 struct pmi_record_options {
 	pid_t pid;
 	pid_t tid;
@@ -15,6 +20,7 @@ struct pmi_record_options {
 	const char *output_path;
 	uint64_t period;
 	enum pmi_stack_mode stack_mode;
+	enum pmi_write_mode write_mode;
 	bool capture_kernel_stack;
 	bool debug_perf;
 	int mmap_pages;
