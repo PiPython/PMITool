@@ -15,8 +15,9 @@
 #define PMI_MAX_LINE_LEN 4096
 
 enum pmi_stack_mode {
-	PMI_STACK_TOP = 0,
-	PMI_STACK_FULL = 1,
+	PMI_STACK_NONE = 0,
+	PMI_STACK_TOP = 1,
+	PMI_STACK_FULL = 2,
 };
 
 enum pmi_lost_flags {

@@ -24,13 +24,22 @@ int main(void)
 	struct pmi_perf_group_snapshot snapshot;
 	const uint64_t sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID |
 				     PERF_SAMPLE_TIME | PERF_SAMPLE_CPU |
-				     PERF_SAMPLE_READ | PERF_SAMPLE_STREAM_ID;
+				     PERF_SAMPLE_READ | PERF_SAMPLE_STREAM_ID |
+				     PERF_SAMPLE_CALLCHAIN;
 	uint64_t ip = 0x1234;
 	uint32_t pid = 11, tid = 22, cpu = 3, reserved = 0;
 	uint64_t time_ns = 55;
 	uint64_t nr = 2, enabled = 100, running = 90;
 	uint64_t value0 = 1000, id0 = 1, value1 = 2000, id1 = 2;
 	uint64_t stream_id = 99;
+	uint64_t nr_callchain = 5;
+	uint64_t frames[] = {
+		(uint64_t)PERF_CONTEXT_USER,
+		0xaaaa,
+		0,
+		(uint64_t)PERF_CONTEXT_KERNEL,
+		0xbbbb,
+	};
 	int err;
 
 	memcpy(cursor, &ip, sizeof(ip));
@@ -56,6 +65,10 @@ int main(void)
 	memcpy(cursor, &value1, sizeof(value1));
 	memcpy(cursor + sizeof(value1), &id1, sizeof(id1));
 	cursor += sizeof(value1) + sizeof(id1);
+	memcpy(cursor, &nr_callchain, sizeof(nr_callchain));
+	cursor += sizeof(nr_callchain);
+	memcpy(cursor, frames, sizeof(frames));
+	cursor += sizeof(frames);
 
 	err = pmi_perf_decode_sample(payload, (size_t)(cursor - payload), sample_type,
 				     &sample);
@@ -73,6 +86,9 @@ int main(void)
 	CHECK(sample.events[0].time_running == running);
 	CHECK(sample.events[1].id == id1);
 	CHECK(sample.events[1].value == value1);
+	CHECK(sample.callchain_count == 2);
+	CHECK(sample.callchain[0] == 0xaaaa);
+	CHECK(sample.callchain[1] == 0xbbbb);
 
 	cursor = payload;
 	memcpy(cursor, &nr, sizeof(nr));
