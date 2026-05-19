@@ -1,0 +1,4 @@
+build/
+third_party/libbpf/src/*.a
+third_party/libbpf/src/*.so*
+third_party/libbpf/src/build/
