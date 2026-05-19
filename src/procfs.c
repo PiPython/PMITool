@@ -19,8 +19,10 @@ static int read_first_line(const char *path, char *buf, size_t cap)
 		return -errno;
 
 	if (!fgets(buf, cap, fp)) {
+		int failed = ferror(fp);
+
 		fclose(fp);
-		return ferror(fp) ? -errno : -ENOENT;
+		return failed ? -errno : -ENOENT;
 	}
 	fclose(fp);
 
