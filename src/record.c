@@ -506,7 +506,7 @@ int pmi_record_main(int argc, char **argv)
 		}
 	}
 
-	err = pmi_output_open(&rt.writer, rt.opts.output_path, rt.opts.period);
+	err = pmi_output_open(&rt.writer, rt.opts.output_path, &rt.events);
 	if (err) {
 		fprintf(stderr, "open output failed: %s\n", strerror(-err));
 		return 1;

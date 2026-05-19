@@ -1,6 +1,6 @@
 # PMITool
 
- Linux/arm64 PMI sampler implemented in C with `perf_event_open`.
+Linux/arm64 PMI sampler implemented in C with `perf_event_open`.
 
 ## Scope
 
@@ -12,8 +12,8 @@
 
 ## Build prerequisites
 
-The default build is pure `perf_event_open`; `libbpf` is no longer required.
-You only need a C toolchain plus Linux UAPI headers.
+The build is pure `perf_event_open`.
+You only need a C toolchain, Linux UAPI headers, and `libdl`.
 
 - `clang` or `gcc`
 - `make`
@@ -85,9 +85,17 @@ Per-sample report:
 ./build/pmi report -i samples.pmi -m samples
 ```
 
+Filter report output by one or more tids:
+
+```bash
+./build/pmi report -i samples.pmi -t 1234,5678
+```
+
 `report` defaults to an overview table by `top` function and, when `-s full`
 samples exist, a second `full stacks` section with symbolized folded stacks.
-`-m samples` instead prints every sample in file order.
+`-m samples` instead prints every sample in file order. Any `-e` events are
+expanded into one column per event name in both raw output and report output.
+When symbols are mangled C++ names, `report` will demangle them for display.
 
 Help:
 
@@ -101,14 +109,23 @@ Help:
 
 `record` writes tab-separated text records:
 
+Without `-e`, rows look like:
+
 ```text
-S <seq> <insn_delta> <pid> <tid> <events> <top> <stack>
+S <seq> <insn_delta> <pid> <tid> <top> <stack>
+```
+
+With `-e r0010,r0011`, rows look like:
+
+```text
+S <seq> <insn_delta> <pid> <tid> <r0010> <r0011> <top> <stack>
 ```
 
 - `seq`: sample sequence number starting from 1
 - `insn_delta`: instructions retired since the previous sample of the same `tid`
 - `top`: leaf function name; `-` when `-s` is omitted
-- `events`: comma-separated raw PMU deltas such as `r0010=123,r0011=456`
+- each `-e` event becomes its own delta column named after the raw event, such
+  as `r0010` or `r0011`
 - `stack`: `-` when `-s` is omitted or `-s top`; with `-s full` it stores the
   remaining raw callchain IPs after the leaf frame, such as `0xaaa;0xbbb`
 

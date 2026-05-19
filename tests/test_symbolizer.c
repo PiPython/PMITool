@@ -37,6 +37,11 @@ int main(void)
 					  sizeof(symbol));
 	CHECK(err == 0);
 	CHECK(strstr(symbol, "fixture_symbol_target") != NULL);
+	err = pmi_symbolizer_pretty_name(symbolizer, "_ZN3foo3barEi", symbol,
+					 sizeof(symbol));
+	CHECK(err == 0);
+	CHECK(strcmp(symbol, "foo::bar(int)") == 0 ||
+	      strcmp(symbol, "_ZN3foo3barEi") == 0);
 	pmi_symbolizer_destroy(symbolizer);
 	return 0;
 }

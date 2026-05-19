@@ -34,10 +34,14 @@ static char *next_field(char **cursor)
 int main(void)
 {
 	char path[] = "/tmp/pmi-output-v3-XXXXXX";
+	char no_event_path[] = "/tmp/pmi-output-v3-no-events-XXXXXX";
 	struct pmi_output_writer writer;
+	struct pmi_event_list event_list;
 	struct pmi_perf_sample sample1;
 	struct pmi_perf_sample sample2;
 	struct pmi_perf_sample sample3;
+	struct pmi_output_writer no_event_writer;
+	struct pmi_perf_sample no_event_sample;
 	FILE *fp;
 	char header[64];
 	char columns[256];
@@ -49,6 +53,11 @@ int main(void)
 	fd = mkstemp(path);
 	CHECK(fd >= 0);
 	close(fd);
+
+	memset(&event_list, 0, sizeof(event_list));
+	event_list.count = 2;
+	strcpy(event_list.items[0].name, "r0010");
+	strcpy(event_list.items[1].name, "r0011");
 
 	memset(&sample1, 0, sizeof(sample1));
 	sample1.pid = 11;
@@ -83,7 +92,7 @@ int main(void)
 	strcpy(sample3.event_names[1], "r0010");
 	strcpy(sample3.event_names[2], "r0011");
 
-	err = pmi_output_open(&writer, path, 1000000);
+	err = pmi_output_open(&writer, path, &event_list);
 	CHECK(err == 0);
 	err = pmi_output_write_sample(&writer, &sample1, "hot_func", "0x2345");
 	CHECK(err == 0);
@@ -104,7 +113,8 @@ int main(void)
 	CHECK(strcmp(next_field(&cursor), "insn_delta") == 0);
 	CHECK(strcmp(next_field(&cursor), "pid") == 0);
 	CHECK(strcmp(next_field(&cursor), "tid") == 0);
-	CHECK(strcmp(next_field(&cursor), "events") == 0);
+	CHECK(strcmp(next_field(&cursor), "r0010") == 0);
+	CHECK(strcmp(next_field(&cursor), "r0011") == 0);
 	CHECK(strcmp(next_field(&cursor), "top") == 0);
 	CHECK(strcmp(next_field(&cursor), "stack") == 0);
 	CHECK(fgets(line, sizeof(line), fp) != NULL);
@@ -114,7 +124,8 @@ int main(void)
 	CHECK(strcmp(next_field(&cursor), "1000000") == 0);
 	CHECK(strcmp(next_field(&cursor), "11") == 0);
 	CHECK(strcmp(next_field(&cursor), "22") == 0);
-	CHECK(strcmp(next_field(&cursor), "r0010=7,r0011=9") == 0);
+	CHECK(strcmp(next_field(&cursor), "7") == 0);
+	CHECK(strcmp(next_field(&cursor), "9") == 0);
 	CHECK(strcmp(next_field(&cursor), "hot_func") == 0);
 	CHECK(strcmp(next_field(&cursor), "0x2345") == 0);
 	CHECK(fgets(line, sizeof(line), fp) != NULL);
@@ -124,7 +135,8 @@ int main(void)
 	CHECK(strcmp(next_field(&cursor), "100") == 0);
 	CHECK(strcmp(next_field(&cursor), "11") == 0);
 	CHECK(strcmp(next_field(&cursor), "22") == 0);
-	CHECK(strcmp(next_field(&cursor), "r0010=3,r0011=6") == 0);
+	CHECK(strcmp(next_field(&cursor), "3") == 0);
+	CHECK(strcmp(next_field(&cursor), "6") == 0);
 	CHECK(strcmp(next_field(&cursor), "hot_func") == 0);
 	CHECK(strcmp(next_field(&cursor), "0x3345") == 0);
 	CHECK(fgets(line, sizeof(line), fp) != NULL);
@@ -134,10 +146,53 @@ int main(void)
 	CHECK(strcmp(next_field(&cursor), "500") == 0);
 	CHECK(strcmp(next_field(&cursor), "11") == 0);
 	CHECK(strcmp(next_field(&cursor), "33") == 0);
-	CHECK(strcmp(next_field(&cursor), "r0010=2,r0011=4") == 0);
+	CHECK(strcmp(next_field(&cursor), "2") == 0);
+	CHECK(strcmp(next_field(&cursor), "4") == 0);
 	CHECK(strcmp(next_field(&cursor), "other_func") == 0);
 	CHECK(strcmp(next_field(&cursor), "-") == 0);
 	fclose(fp);
 	unlink(path);
+
+	fd = mkstemp(no_event_path);
+	CHECK(fd >= 0);
+	close(fd);
+
+	memset(&no_event_sample, 0, sizeof(no_event_sample));
+	no_event_sample.pid = 99;
+	no_event_sample.tid = 99;
+	no_event_sample.event_count = 1;
+	no_event_sample.events[0].value = 42;
+	strcpy(no_event_sample.event_names[0], "instructions");
+
+	err = pmi_output_open(&no_event_writer, no_event_path, NULL);
+	CHECK(err == 0);
+	err = pmi_output_write_sample(&no_event_writer, &no_event_sample, "-", "-");
+	CHECK(err == 0);
+	pmi_output_close(&no_event_writer);
+
+	fp = fopen(no_event_path, "r");
+	CHECK(fp != NULL);
+	CHECK(fgets(header, sizeof(header), fp) != NULL);
+	CHECK(strcmp(header, "# pmi raw v3\n") == 0);
+	CHECK(fgets(columns, sizeof(columns), fp) != NULL);
+	cursor = columns;
+	CHECK(strcmp(next_field(&cursor), "type") == 0);
+	CHECK(strcmp(next_field(&cursor), "seq") == 0);
+	CHECK(strcmp(next_field(&cursor), "insn_delta") == 0);
+	CHECK(strcmp(next_field(&cursor), "pid") == 0);
+	CHECK(strcmp(next_field(&cursor), "tid") == 0);
+	CHECK(strcmp(next_field(&cursor), "top") == 0);
+	CHECK(strcmp(next_field(&cursor), "stack") == 0);
+	CHECK(fgets(line, sizeof(line), fp) != NULL);
+	cursor = line;
+	CHECK(strcmp(next_field(&cursor), "S") == 0);
+	CHECK(strcmp(next_field(&cursor), "1") == 0);
+	CHECK(strcmp(next_field(&cursor), "42") == 0);
+	CHECK(strcmp(next_field(&cursor), "99") == 0);
+	CHECK(strcmp(next_field(&cursor), "99") == 0);
+	CHECK(strcmp(next_field(&cursor), "-") == 0);
+	CHECK(strcmp(next_field(&cursor), "-") == 0);
+	fclose(fp);
+	unlink(no_event_path);
 	return 0;
 }

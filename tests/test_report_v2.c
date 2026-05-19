@@ -31,8 +31,10 @@ int main(void)
 	char samples_output[4096] = { 0 };
 	char stack_field[128];
 	char top_field[64];
-	char *overview_argv[] = { "report", "-i", input_path, "-l", "10", NULL };
-	char *samples_argv[] = { "report", "-i", input_path, "-m", "samples", NULL };
+	char *overview_argv[] = { "report", "-i", input_path, "-l", "10", "-t",
+				  "202", NULL };
+	char *samples_argv[] = { "report", "-i", input_path, "-m", "samples",
+				 "-t", "202", NULL };
 	FILE *fp;
 	int input_fd;
 	int output_fd;
@@ -43,7 +45,7 @@ int main(void)
 
 	snprintf(stack_field, sizeof(stack_field), "0x%llx",
 		 (unsigned long long)parent_ip);
-	snprintf(top_field, sizeof(top_field), "%s", "report_fixture_leaf");
+	snprintf(top_field, sizeof(top_field), "%s", "_ZN3foo3barEi");
 
 	input_fd = mkstemp(input_path);
 	CHECK(input_fd >= 0);
@@ -51,12 +53,12 @@ int main(void)
 	CHECK(fp != NULL);
 	fprintf(fp, "# pmi raw v3\n");
 	fprintf(fp,
-		"type\tseq\tinsn_delta\tpid\ttid\tevents\ttop\tstack\n");
-	fprintf(fp, "S\t1\t1000000\t%d\t%d\tr0010=3,r0011=5\tleaf\t-\n",
-		getpid(), getpid());
+		"type\tseq\tinsn_delta\tpid\ttid\tr0010\tr0011\ttop\tstack\n");
+	fprintf(fp, "S\t1\t1000000\t%d\t%d\t3\t5\tleaf\t-\n",
+		getpid(), 101);
 	fprintf(fp,
-		"S\t2\t100\t%d\t%d\tr0010=7\t%s\t%s\n",
-		getpid(), getpid(), top_field, stack_field);
+		"S\t2\t100\t%d\t%d\t7\t0\t%s\t%s\n",
+		getpid(), 202, top_field, stack_field);
 	fclose(fp);
 
 	output_fd = mkstemp(output_overview_path);
@@ -67,7 +69,7 @@ int main(void)
 	CHECK(dup2(output_fd, STDOUT_FILENO) >= 0);
 	close(output_fd);
 
-	err = pmi_report_main(5, overview_argv);
+	err = pmi_report_main(7, overview_argv);
 	fflush(stdout);
 	CHECK(dup2(saved_stdout, STDOUT_FILENO) >= 0);
 	close(saved_stdout);
@@ -82,15 +84,18 @@ int main(void)
 	CHECK(strstr(output, "samples") != NULL);
 	CHECK(strstr(output, "insn_delta") != NULL);
 	CHECK(strstr(output, "top") != NULL);
-	CHECK(strstr(output, "leaf") != NULL);
-	CHECK(strstr(output, "report_fixture_leaf") != NULL);
+	CHECK(strstr(output, "leaf") == NULL);
+	CHECK(strstr(output, "foo::bar(int)") != NULL);
 	CHECK(strstr(output, "full stacks") != NULL);
-	CHECK(strstr(output, "report_fixture_leaf;report_fixture_parent") != NULL);
-	CHECK(strstr(output, "1000000") != NULL);
+	CHECK(strstr(output, "foo::bar(int);report_fixture_parent") != NULL);
+	CHECK(strstr(output, "1000000") == NULL);
 	CHECK(strstr(output, "100") != NULL);
-	CHECK(strstr(output, "r0010=3") != NULL);
-	CHECK(strstr(output, "r0011=5") != NULL);
-	CHECK(strstr(output, "r0010=7") != NULL);
+	CHECK(strstr(output, "r0010") != NULL);
+	CHECK(strstr(output, "r0011") != NULL);
+	CHECK(strstr(output, "\t3\t5\tleaf") == NULL &&
+	      strstr(output, "3\t5\tleaf") == NULL);
+	CHECK(strstr(output, "\t7\t0\tfoo::bar(int)") != NULL ||
+	      strstr(output, "7\t0\tfoo::bar(int)") != NULL);
 
 	samples_output_fd = mkstemp(output_samples_path);
 	CHECK(samples_output_fd >= 0);
@@ -100,7 +105,7 @@ int main(void)
 	CHECK(dup2(samples_output_fd, STDOUT_FILENO) >= 0);
 	close(samples_output_fd);
 
-	err = pmi_report_main(5, samples_argv);
+	err = pmi_report_main(7, samples_argv);
 	fflush(stdout);
 	CHECK(dup2(saved_stdout, STDOUT_FILENO) >= 0);
 	close(saved_stdout);
@@ -114,9 +119,12 @@ int main(void)
 
 	CHECK(strstr(samples_output, "seq") != NULL);
 	CHECK(strstr(samples_output, "insn_delta") != NULL);
-	CHECK(strstr(samples_output, "leaf") != NULL);
-	CHECK(strstr(samples_output, "report_fixture_leaf;report_fixture_parent") != NULL);
-	CHECK(strstr(samples_output, "r0010=7") != NULL);
+	CHECK(strstr(samples_output, "r0010") != NULL);
+	CHECK(strstr(samples_output, "r0011") != NULL);
+	CHECK(strstr(samples_output, "leaf") == NULL);
+	CHECK(strstr(samples_output, "foo::bar(int);report_fixture_parent") != NULL);
+	CHECK(strstr(samples_output, "\t7\t0\tfoo::bar(int)") != NULL ||
+	      strstr(samples_output, "7\t0\tfoo::bar(int)") != NULL);
 
 	unlink(input_path);
 	unlink(output_overview_path);

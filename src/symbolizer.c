@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 
+#include <dlfcn.h>
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -32,18 +33,49 @@ struct pmi_module_cache {
 	uint16_t elf_type;
 };
 
+struct pmi_demangle_cache {
+	char *raw;
+	char *pretty;
+};
+
+typedef char *(*pmi_cxa_demangle_fn)(const char *mangled_name, char *output_buffer,
+				      size_t *length, int *status);
+
 struct pmi_symbolizer {
 	struct pmi_module_cache *modules;
 	size_t count;
 	size_t cap;
+
+	void *demangle_handle;
+	pmi_cxa_demangle_fn demangle_fn;
+	bool demangle_attempted;
+	struct pmi_demangle_cache *demangle_cache;
+	size_t demangle_count;
+	size_t demangle_cap;
 };
+
+static bool looks_like_mangled_cpp_name(const char *raw)
+{
+	return raw && raw[0] == '_' && raw[1] == 'Z';
+}
+
+static void strip_symbol_offset(const char *raw, char *base, size_t base_cap)
+{
+	char *plus;
+
+	pmi_copy_cstr_trunc(base, base_cap, raw ? raw : "");
+	plus = strstr(base, "+0x");
+	if (plus)
+		*plus = '\0';
+}
 
 static int parse_symbols(struct pmi_module_cache *cache, const void *image, size_t len)
 {
 	const Elf64_Ehdr *ehdr = image;
 	const Elf64_Shdr *shdrs;
 	const char *base = image;
-	size_t i, total = 0;
+	size_t i;
+	size_t total = 0;
 
 	if (len < sizeof(*ehdr) || memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0)
 		return -EINVAL;
@@ -51,13 +83,14 @@ static int parse_symbols(struct pmi_module_cache *cache, const void *image, size
 		return -ENOTSUP;
 	if (len < ehdr->e_shoff + (size_t)ehdr->e_shentsize * ehdr->e_shnum)
 		return -EINVAL;
-	cache->elf_type = ehdr->e_type;
 
+	cache->elf_type = ehdr->e_type;
 	shdrs = (const Elf64_Shdr *)(base + ehdr->e_shoff);
 	for (i = 0; i < ehdr->e_shnum; ++i) {
 		if (shdrs[i].sh_type == SHT_SYMTAB || shdrs[i].sh_type == SHT_DYNSYM)
 			total += shdrs[i].sh_size / sizeof(Elf64_Sym);
 	}
+
 	cache->symbols = calloc(total ? total : 1, sizeof(*cache->symbols));
 	if (!cache->symbols)
 		return -ENOMEM;
@@ -66,7 +99,8 @@ static int parse_symbols(struct pmi_module_cache *cache, const void *image, size
 		const Elf64_Shdr *symtab = &shdrs[i];
 		const Elf64_Shdr *strtab;
 		const Elf64_Sym *syms;
-		size_t j, nsyms;
+		size_t j;
+		size_t nsyms;
 
 		if (symtab->sh_type != SHT_SYMTAB && symtab->sh_type != SHT_DYNSYM)
 			continue;
@@ -78,23 +112,25 @@ static int parse_symbols(struct pmi_module_cache *cache, const void *image, size
 		strtab = &shdrs[symtab->sh_link];
 		if (len < strtab->sh_offset + strtab->sh_size)
 			continue;
+
 		syms = (const Elf64_Sym *)(base + symtab->sh_offset);
 		nsyms = symtab->sh_size / sizeof(Elf64_Sym);
+		for (j = 0; j < nsyms; ++j) {
+			const char *name;
 
-			for (j = 0; j < nsyms; ++j) {
-				const char *name;
+			if (syms[j].st_name == 0 || syms[j].st_shndx == SHN_UNDEF)
+				continue;
+			if (ELF64_ST_TYPE(syms[j].st_info) != STT_FUNC &&
+			    ELF64_ST_TYPE(syms[j].st_info) != STT_GNU_IFUNC)
+				continue;
 
-				if (syms[j].st_name == 0 || syms[j].st_shndx == SHN_UNDEF)
-					continue;
-				if (ELF64_ST_TYPE(syms[j].st_info) != STT_FUNC &&
-				    ELF64_ST_TYPE(syms[j].st_info) != STT_GNU_IFUNC)
-					continue;
-				name = base + strtab->sh_offset + syms[j].st_name;
-				if (name[0] == '\0' || name[0] == '$')
-					continue;
-				cache->symbols[cache->count].value = syms[j].st_value;
-				cache->symbols[cache->count].size = syms[j].st_size;
-				cache->symbols[cache->count].name = strdup(name);
+			name = base + strtab->sh_offset + syms[j].st_name;
+			if (name[0] == '\0' || name[0] == '$')
+				continue;
+
+			cache->symbols[cache->count].value = syms[j].st_value;
+			cache->symbols[cache->count].size = syms[j].st_size;
+			cache->symbols[cache->count].name = strdup(name);
 			if (!cache->symbols[cache->count].name)
 				return -ENOMEM;
 			cache->count++;
@@ -113,7 +149,20 @@ static struct pmi_module_cache *find_module(struct pmi_symbolizer *symbolizer,
 		if (strcmp(symbolizer->modules[i].path, path) == 0)
 			return &symbolizer->modules[i];
 	}
+
 	return NULL;
+}
+
+static void free_module_cache(struct pmi_module_cache *cache)
+{
+	size_t i;
+
+	if (!cache)
+		return;
+	for (i = 0; i < cache->count; ++i)
+		free(cache->symbols[i].name);
+	free(cache->symbols);
+	memset(cache, 0, sizeof(*cache));
 }
 
 static struct pmi_module_cache *load_module(struct pmi_symbolizer *symbolizer,
@@ -139,6 +188,7 @@ static struct pmi_module_cache *load_module(struct pmi_symbolizer *symbolizer,
 		symbolizer->modules = tmp;
 		symbolizer->cap = new_cap;
 	}
+
 	cache = &symbolizer->modules[symbolizer->count];
 	memset(cache, 0, sizeof(*cache));
 	if (pmi_copy_cstr(cache->path, sizeof(cache->path), path) != 0)
@@ -149,12 +199,15 @@ static struct pmi_module_cache *load_module(struct pmi_symbolizer *symbolizer,
 		return NULL;
 	if (fstat(fd, &st) != 0)
 		goto fail;
+
 	image = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
 	if (image == MAP_FAILED)
 		goto fail;
+
 	err = parse_symbols(cache, image, st.st_size);
 	if (err)
 		goto fail;
+
 	munmap(image, st.st_size);
 	close(fd);
 	symbolizer->count++;
@@ -165,10 +218,7 @@ fail:
 		munmap(image, st.st_size);
 	if (fd >= 0)
 		close(fd);
-	for (size_t i = 0; i < cache->count; ++i)
-		free(cache->symbols[i].name);
-	free(cache->symbols);
-	memset(cache, 0, sizeof(*cache));
+	free_module_cache(cache);
 	return NULL;
 }
 
@@ -185,14 +235,17 @@ static int resolve_module(pid_t pid, uint64_t ip, char *module, size_t module_ca
 		return -errno;
 
 	while (fgets(line, sizeof(line), fp)) {
-		unsigned long start, end, offset, inode;
+		unsigned long start;
+		unsigned long end;
+		unsigned long offset;
+		unsigned long inode;
 		char perms[8];
 		char dev[32];
 		int consumed = 0;
 		char *path;
 
-		if (sscanf(line, "%lx-%lx %7s %lx %31s %lu %n", &start, &end, perms,
-			   &offset, dev, &inode, &consumed) < 6)
+		if (sscanf(line, "%lx-%lx %7s %lx %31s %lu %n",
+			   &start, &end, perms, &offset, dev, &inode, &consumed) < 6)
 			continue;
 		if (ip < start || ip >= end)
 			continue;
@@ -233,12 +286,85 @@ static int lookup_symbol(struct pmi_module_cache *cache, uint64_t rel_ip,
 	return 0;
 }
 
+static void maybe_init_demangler(struct pmi_symbolizer *symbolizer)
+{
+	static const char *const libs[] = {
+		"libstdc++.so.6",
+		"libc++abi.so.1",
+		"libc++abi.so",
+	};
+	size_t i;
+
+	if (!symbolizer || symbolizer->demangle_attempted)
+		return;
+
+	symbolizer->demangle_attempted = true;
+	for (i = 0; i < sizeof(libs) / sizeof(libs[0]); ++i) {
+		void *handle = dlopen(libs[i], RTLD_LAZY | RTLD_LOCAL);
+
+		if (!handle)
+			continue;
+		symbolizer->demangle_fn =
+			(pmi_cxa_demangle_fn)dlsym(handle, "__cxa_demangle");
+		if (symbolizer->demangle_fn) {
+			symbolizer->demangle_handle = handle;
+			return;
+		}
+		dlclose(handle);
+	}
+}
+
+static const char *find_pretty_name(struct pmi_symbolizer *symbolizer, const char *raw)
+{
+	size_t i;
+
+	for (i = 0; i < symbolizer->demangle_count; ++i) {
+		if (strcmp(symbolizer->demangle_cache[i].raw, raw) == 0)
+			return symbolizer->demangle_cache[i].pretty;
+	}
+
+	return NULL;
+}
+
+static int cache_pretty_name(struct pmi_symbolizer *symbolizer, const char *raw,
+			     const char *pretty)
+{
+	struct pmi_demangle_cache *entry;
+
+	if (symbolizer->demangle_count == symbolizer->demangle_cap) {
+		size_t new_cap = symbolizer->demangle_cap ? symbolizer->demangle_cap * 2 : 32;
+		struct pmi_demangle_cache *tmp;
+
+		tmp = realloc(symbolizer->demangle_cache,
+			      new_cap * sizeof(*symbolizer->demangle_cache));
+		if (!tmp)
+			return -ENOMEM;
+		symbolizer->demangle_cache = tmp;
+		symbolizer->demangle_cap = new_cap;
+	}
+
+	entry = &symbolizer->demangle_cache[symbolizer->demangle_count++];
+	entry->raw = strdup(raw);
+	entry->pretty = strdup(pretty);
+	if (!entry->raw || !entry->pretty) {
+		free(entry->raw);
+		free(entry->pretty);
+		entry->raw = NULL;
+		entry->pretty = NULL;
+		symbolizer->demangle_count--;
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
 int pmi_symbolizer_init(struct pmi_symbolizer **symbolizer)
 {
 	struct pmi_symbolizer *out;
 
 	if (!symbolizer)
 		return -EINVAL;
+
 	out = calloc(1, sizeof(*out));
 	if (!out)
 		return -ENOMEM;
@@ -248,16 +374,21 @@ int pmi_symbolizer_init(struct pmi_symbolizer **symbolizer)
 
 void pmi_symbolizer_destroy(struct pmi_symbolizer *symbolizer)
 {
-	size_t i, j;
+	size_t i;
 
 	if (!symbolizer)
 		return;
-	for (i = 0; i < symbolizer->count; ++i) {
-		for (j = 0; j < symbolizer->modules[i].count; ++j)
-			free(symbolizer->modules[i].symbols[j].name);
-		free(symbolizer->modules[i].symbols);
+
+	for (i = 0; i < symbolizer->count; ++i)
+		free_module_cache(&symbolizer->modules[i]);
+	for (i = 0; i < symbolizer->demangle_count; ++i) {
+		free(symbolizer->demangle_cache[i].raw);
+		free(symbolizer->demangle_cache[i].pretty);
 	}
 	free(symbolizer->modules);
+	free(symbolizer->demangle_cache);
+	if (symbolizer->demangle_handle)
+		dlclose(symbolizer->demangle_handle);
 	free(symbolizer);
 }
 
@@ -289,6 +420,7 @@ int pmi_symbolizer_symbolize_ip(struct pmi_symbolizer *symbolizer, pid_t pid,
 	lookup_ip = (cache && cache->elf_type == ET_EXEC) ? ip : relative_ip;
 	if (!cache || lookup_symbol(cache, lookup_ip, symbol, symbol_cap) != 0)
 		snprintf(symbol, symbol_cap, "0x%" PRIx64, ip);
+
 	return 0;
 }
 
@@ -319,5 +451,46 @@ int pmi_symbolizer_symbolize_stack(struct pmi_symbolizer *symbolizer, pid_t pid,
 			break;
 		len += (size_t)written;
 	}
+
+	return 0;
+}
+
+int pmi_symbolizer_pretty_name(struct pmi_symbolizer *symbolizer,
+			       const char *raw, char *pretty,
+			       size_t pretty_cap)
+{
+	char base[PMI_MAX_SYMBOL_LEN];
+	const char *cached;
+
+	if (!symbolizer || !raw || !pretty || pretty_cap == 0)
+		return -EINVAL;
+
+	strip_symbol_offset(raw, base, sizeof(base));
+	if (!looks_like_mangled_cpp_name(base)) {
+		pmi_copy_cstr_trunc(pretty, pretty_cap, base);
+		return 0;
+	}
+
+	cached = find_pretty_name(symbolizer, base);
+	if (!cached) {
+		const char *resolved = base;
+
+		maybe_init_demangler(symbolizer);
+		if (symbolizer->demangle_fn) {
+			int status = 0;
+			char *demangled =
+				symbolizer->demangle_fn(base, NULL, NULL, &status);
+
+			if (status == 0 && demangled && demangled[0] != '\0')
+				resolved = demangled;
+			cache_pretty_name(symbolizer, base, resolved);
+			free(demangled);
+		} else {
+			cache_pretty_name(symbolizer, base, base);
+		}
+		cached = find_pretty_name(symbolizer, base);
+	}
+
+	pmi_copy_cstr_trunc(pretty, pretty_cap, cached ? cached : base);
 	return 0;
 }
