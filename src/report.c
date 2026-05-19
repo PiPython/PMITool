@@ -12,6 +12,30 @@
 #include "pmi/symbolizer.h"
 
 #define PMI_REPORT_MAX_FIELDS (PMI_MAX_EVENTS + 6)
+#define PMI_REPORT_TOP_DISPLAY_WIDTH 48
+#define PMI_REPORT_STACK_DISPLAY_WIDTH 96
+
+struct sample_row {
+	uint64_t seq;
+	uint64_t insn_delta;
+	pid_t pid;
+	pid_t tid;
+	uint64_t event_values[PMI_MAX_EVENTS - 1];
+	size_t event_count;
+	char top[PMI_MAX_SYMBOL_LEN];
+	char stack[PMI_MAX_STACK_TEXT_LEN];
+};
+
+struct table_layout {
+	size_t seq_w;
+	size_t pid_w;
+	size_t tid_w;
+	size_t samples_w;
+	size_t insn_w;
+	size_t event_w[PMI_MAX_EVENTS - 1];
+	size_t top_w;
+	size_t stack_w;
+};
 
 struct report_schema {
 	char event_names[PMI_MAX_EVENTS - 1][PMI_MAX_EVENT_NAME];
@@ -466,36 +490,429 @@ static int parse_sample_line(char *line, const struct report_schema *schema,
 	return 0;
 }
 
-static void print_event_headers(const struct report_schema *schema)
+static size_t decimal_width_u64(uint64_t value)
 {
-	size_t i;
+	char text[32];
+	int written;
 
-	for (i = 0; i < schema->event_count; ++i)
-		printf("\t%s", schema->event_names[i]);
+	written = snprintf(text, sizeof(text), "%" PRIu64, value);
+	return written > 0 ? (size_t)written : 1;
 }
 
-static void print_event_values(const uint64_t *values, size_t count)
+static size_t decimal_width_size(size_t value)
+{
+	char text[32];
+	int written;
+
+	written = snprintf(text, sizeof(text), "%zu", value);
+	return written > 0 ? (size_t)written : 1;
+}
+
+static size_t decimal_width_pid(pid_t value)
+{
+	char text[32];
+	int written;
+
+	written = snprintf(text, sizeof(text), "%d", (int)value);
+	return written > 0 ? (size_t)written : 1;
+}
+
+static size_t capped_text_width(const char *text, size_t max_width)
+{
+	size_t len;
+
+	if (!text)
+		return 1;
+	len = strlen(text);
+	return len < max_width ? len : max_width;
+}
+
+static void ellipsize_text(const char *src, size_t max_width, char *dst,
+			   size_t dst_cap)
+{
+	size_t copy_len;
+
+	if (!dst || dst_cap == 0)
+		return;
+
+	if (!src || src[0] == '\0')
+		src = "-";
+	if (max_width == 0) {
+		dst[0] = '\0';
+		return;
+	}
+	if (strlen(src) <= max_width) {
+		pmi_copy_cstr_trunc(dst, dst_cap, src);
+		return;
+	}
+	if (max_width <= 3) {
+		copy_len = max_width < dst_cap - 1 ? max_width : dst_cap - 1;
+		memcpy(dst, src, copy_len);
+		dst[copy_len] = '\0';
+		return;
+	}
+
+	copy_len = max_width - 3;
+	if (copy_len > dst_cap - 4)
+		copy_len = dst_cap - 4;
+	memcpy(dst, src, copy_len);
+	memcpy(dst + copy_len, "...", 3);
+	dst[copy_len + 3] = '\0';
+}
+
+static void print_gap(void)
+{
+	printf("  ");
+}
+
+static void print_text_cell(const char *text, size_t width, size_t max_width)
+{
+	char clipped[PMI_MAX_STACK_TEXT_LEN];
+
+	ellipsize_text(text, max_width, clipped, sizeof(clipped));
+	printf("%-*s", (int)width, clipped);
+}
+
+static void print_u64_cell(uint64_t value, size_t width)
+{
+	printf("%*" PRIu64, (int)width, value);
+}
+
+static void print_size_cell(size_t value, size_t width)
+{
+	printf("%*zu", (int)width, value);
+}
+
+static void print_pid_cell(pid_t value, size_t width)
+{
+	printf("%*d", (int)width, (int)value);
+}
+
+static void print_separator_cell(size_t width)
 {
 	size_t i;
 
-	for (i = 0; i < count; ++i)
-		printf("\t%" PRIu64, values[i]);
+	for (i = 0; i < width; ++i)
+		putchar('-');
+}
+
+static int append_sample_row(struct sample_row **rows, size_t *count, size_t *cap,
+			     const struct parsed_sample *sample, const char *top,
+			     const char *stack)
+{
+	struct sample_row *row;
+
+	if (*count == *cap) {
+		size_t new_cap = *cap ? *cap * 2 : 64;
+		struct sample_row *tmp;
+
+		tmp = realloc(*rows, new_cap * sizeof(**rows));
+		if (!tmp)
+			return -ENOMEM;
+		*rows = tmp;
+		*cap = new_cap;
+	}
+
+	row = &(*rows)[(*count)++];
+	memset(row, 0, sizeof(*row));
+	row->seq = sample->seq;
+	row->insn_delta = sample->insn_delta;
+	row->pid = sample->pid;
+	row->tid = sample->tid;
+	row->event_count = sample->event_count;
+	memcpy(row->event_values, sample->event_values, sizeof(row->event_values));
+	pmi_copy_cstr_trunc(row->top, sizeof(row->top), top);
+	pmi_copy_cstr_trunc(row->stack, sizeof(row->stack), stack);
+	return 0;
+}
+
+static void init_samples_layout(struct table_layout *layout,
+				const struct report_schema *schema)
+{
+	size_t i;
+
+	memset(layout, 0, sizeof(*layout));
+	layout->seq_w = strlen("seq");
+	layout->pid_w = strlen("pid");
+	layout->tid_w = strlen("tid");
+	layout->insn_w = strlen("insn_delta");
+	layout->top_w = strlen("top");
+	layout->stack_w = strlen("stack");
+	for (i = 0; i < schema->event_count; ++i)
+		layout->event_w[i] = strlen(schema->event_names[i]);
+}
+
+static void grow_samples_layout(struct table_layout *layout,
+				const struct sample_row *rows, size_t count,
+				const struct report_schema *schema)
+{
+	size_t i;
+	size_t j;
+
+	for (i = 0; i < count; ++i) {
+		layout->seq_w = layout->seq_w > decimal_width_u64(rows[i].seq) ?
+				layout->seq_w : decimal_width_u64(rows[i].seq);
+		layout->pid_w = layout->pid_w > decimal_width_pid(rows[i].pid) ?
+				layout->pid_w : decimal_width_pid(rows[i].pid);
+		layout->tid_w = layout->tid_w > decimal_width_pid(rows[i].tid) ?
+				layout->tid_w : decimal_width_pid(rows[i].tid);
+		layout->insn_w = layout->insn_w > decimal_width_u64(rows[i].insn_delta) ?
+				 layout->insn_w : decimal_width_u64(rows[i].insn_delta);
+		layout->top_w = layout->top_w > capped_text_width(rows[i].top,
+							  PMI_REPORT_TOP_DISPLAY_WIDTH) ?
+				layout->top_w :
+				capped_text_width(rows[i].top,
+						 PMI_REPORT_TOP_DISPLAY_WIDTH);
+		layout->stack_w =
+			layout->stack_w > capped_text_width(rows[i].stack,
+							    PMI_REPORT_STACK_DISPLAY_WIDTH) ?
+			layout->stack_w :
+			capped_text_width(rows[i].stack,
+					 PMI_REPORT_STACK_DISPLAY_WIDTH);
+		for (j = 0; j < schema->event_count; ++j) {
+			size_t width = decimal_width_u64(rows[i].event_values[j]);
+
+			if (layout->event_w[j] < width)
+				layout->event_w[j] = width;
+		}
+	}
+}
+
+static void init_overview_layout(struct table_layout *layout,
+				 const struct report_schema *schema)
+{
+	size_t i;
+
+	memset(layout, 0, sizeof(*layout));
+	layout->samples_w = strlen("samples");
+	layout->insn_w = strlen("insn_delta");
+	layout->top_w = strlen("top");
+	layout->stack_w = strlen("stack");
+	for (i = 0; i < schema->event_count; ++i)
+		layout->event_w[i] = strlen(schema->event_names[i]);
+}
+
+static void grow_overview_layout(struct table_layout *layout,
+				 const struct report_entry *entries, size_t count,
+				 const struct report_schema *schema)
+{
+	size_t i;
+	size_t j;
+
+	for (i = 0; i < count; ++i) {
+		layout->samples_w =
+			layout->samples_w > decimal_width_size(entries[i].sample_count) ?
+			layout->samples_w : decimal_width_size(entries[i].sample_count);
+		layout->insn_w =
+			layout->insn_w > decimal_width_u64(entries[i].insn_delta_total) ?
+			layout->insn_w : decimal_width_u64(entries[i].insn_delta_total);
+		layout->top_w = layout->top_w > capped_text_width(entries[i].top,
+							  PMI_REPORT_TOP_DISPLAY_WIDTH) ?
+				layout->top_w :
+				capped_text_width(entries[i].top,
+						 PMI_REPORT_TOP_DISPLAY_WIDTH);
+		for (j = 0; j < schema->event_count; ++j) {
+			size_t width = decimal_width_u64(entries[i].event_totals[j]);
+
+			if (layout->event_w[j] < width)
+				layout->event_w[j] = width;
+		}
+	}
+}
+
+static void grow_stack_layout(struct table_layout *layout,
+			      const struct stack_entry *entries, size_t count,
+			      const struct report_schema *schema)
+{
+	size_t i;
+	size_t j;
+
+	for (i = 0; i < count; ++i) {
+		layout->samples_w =
+			layout->samples_w > decimal_width_size(entries[i].sample_count) ?
+			layout->samples_w : decimal_width_size(entries[i].sample_count);
+		layout->insn_w =
+			layout->insn_w > decimal_width_u64(entries[i].insn_delta_total) ?
+			layout->insn_w : decimal_width_u64(entries[i].insn_delta_total);
+		layout->stack_w =
+			layout->stack_w > capped_text_width(entries[i].stack,
+							    PMI_REPORT_STACK_DISPLAY_WIDTH) ?
+			layout->stack_w :
+			capped_text_width(entries[i].stack,
+					 PMI_REPORT_STACK_DISPLAY_WIDTH);
+		for (j = 0; j < schema->event_count; ++j) {
+			size_t width = decimal_width_u64(entries[i].event_totals[j]);
+
+			if (layout->event_w[j] < width)
+				layout->event_w[j] = width;
+		}
+	}
+}
+
+static void print_samples_header(const struct table_layout *layout,
+				 const struct report_schema *schema)
+{
+	size_t i;
+
+	print_text_cell("seq", layout->seq_w, layout->seq_w);
+	print_gap();
+	print_text_cell("pid", layout->pid_w, layout->pid_w);
+	print_gap();
+	print_text_cell("tid", layout->tid_w, layout->tid_w);
+	print_gap();
+	print_text_cell("insn_delta", layout->insn_w, layout->insn_w);
+	for (i = 0; i < schema->event_count; ++i) {
+		print_gap();
+		print_text_cell(schema->event_names[i], layout->event_w[i],
+				layout->event_w[i]);
+	}
+	print_gap();
+	print_text_cell("top", layout->top_w, layout->top_w);
+	print_gap();
+	print_text_cell("stack", layout->stack_w, layout->stack_w);
+	putchar('\n');
+}
+
+static void print_samples_separator(const struct table_layout *layout,
+				    const struct report_schema *schema)
+{
+	size_t i;
+
+	print_separator_cell(layout->seq_w);
+	print_gap();
+	print_separator_cell(layout->pid_w);
+	print_gap();
+	print_separator_cell(layout->tid_w);
+	print_gap();
+	print_separator_cell(layout->insn_w);
+	for (i = 0; i < schema->event_count; ++i) {
+		print_gap();
+		print_separator_cell(layout->event_w[i]);
+	}
+	print_gap();
+	print_separator_cell(layout->top_w);
+	print_gap();
+	print_separator_cell(layout->stack_w);
+	putchar('\n');
+}
+
+static void print_samples_row(const struct sample_row *row,
+			      const struct table_layout *layout,
+			      const struct report_schema *schema)
+{
+	size_t i;
+
+	print_u64_cell(row->seq, layout->seq_w);
+	print_gap();
+	print_pid_cell(row->pid, layout->pid_w);
+	print_gap();
+	print_pid_cell(row->tid, layout->tid_w);
+	print_gap();
+	print_u64_cell(row->insn_delta, layout->insn_w);
+	for (i = 0; i < schema->event_count; ++i) {
+		print_gap();
+		print_u64_cell(row->event_values[i], layout->event_w[i]);
+	}
+	print_gap();
+	print_text_cell(row->top, layout->top_w, PMI_REPORT_TOP_DISPLAY_WIDTH);
+	print_gap();
+	print_text_cell(row->stack, layout->stack_w,
+			PMI_REPORT_STACK_DISPLAY_WIDTH);
+	putchar('\n');
+}
+
+static void print_overview_header(const struct table_layout *layout,
+				  const struct report_schema *schema,
+				  const char *last_column)
+{
+	size_t i;
+
+	print_text_cell("samples", layout->samples_w, layout->samples_w);
+	print_gap();
+	print_text_cell("insn_delta", layout->insn_w, layout->insn_w);
+	for (i = 0; i < schema->event_count; ++i) {
+		print_gap();
+		print_text_cell(schema->event_names[i], layout->event_w[i],
+				layout->event_w[i]);
+	}
+	print_gap();
+	if (strcmp(last_column, "top") == 0)
+		print_text_cell(last_column, layout->top_w, layout->top_w);
+	else
+		print_text_cell(last_column, layout->stack_w, layout->stack_w);
+	putchar('\n');
+}
+
+static void print_overview_separator(const struct table_layout *layout,
+				     const struct report_schema *schema,
+				     bool stack_mode)
+{
+	size_t i;
+
+	print_separator_cell(layout->samples_w);
+	print_gap();
+	print_separator_cell(layout->insn_w);
+	for (i = 0; i < schema->event_count; ++i) {
+		print_gap();
+		print_separator_cell(layout->event_w[i]);
+	}
+	print_gap();
+	print_separator_cell(stack_mode ? layout->stack_w : layout->top_w);
+	putchar('\n');
+}
+
+static void print_overview_row(const struct report_entry *entry,
+			       const struct table_layout *layout,
+			       const struct report_schema *schema)
+{
+	size_t i;
+
+	print_size_cell(entry->sample_count, layout->samples_w);
+	print_gap();
+	print_u64_cell(entry->insn_delta_total, layout->insn_w);
+	for (i = 0; i < schema->event_count; ++i) {
+		print_gap();
+		print_u64_cell(entry->event_totals[i], layout->event_w[i]);
+	}
+	print_gap();
+	print_text_cell(entry->top, layout->top_w, PMI_REPORT_TOP_DISPLAY_WIDTH);
+	putchar('\n');
+}
+
+static void print_stack_row(const struct stack_entry *entry,
+			    const struct table_layout *layout,
+			    const struct report_schema *schema)
+{
+	size_t i;
+
+	print_size_cell(entry->sample_count, layout->samples_w);
+	print_gap();
+	print_u64_cell(entry->insn_delta_total, layout->insn_w);
+	for (i = 0; i < schema->event_count; ++i) {
+		print_gap();
+		print_u64_cell(entry->event_totals[i], layout->event_w[i]);
+	}
+	print_gap();
+	print_text_cell(entry->stack, layout->stack_w,
+			PMI_REPORT_STACK_DISPLAY_WIDTH);
+	putchar('\n');
 }
 
 static int run_samples_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 			      const struct pmi_report_options *opts,
 			      const struct report_schema *schema)
 {
+	struct sample_row *rows = NULL;
+	size_t count = 0;
+	size_t cap = 0;
+	struct table_layout layout;
 	char line[PMI_MAX_LINE_LEN];
-
-	printf("seq\tpid\ttid\tinsn_delta");
-	print_event_headers(schema);
-	printf("\ttop\tstack\n");
+	size_t i;
+	int err = 0;
 
 	while (fgets(line, sizeof(line), fp)) {
 		struct parsed_sample sample;
 		char symbolized_stack[PMI_MAX_STACK_TEXT_LEN];
-		int err;
 
 		err = parse_sample_line(line, schema, &sample);
 		if (err == 1)
@@ -515,19 +932,30 @@ static int run_samples_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 					       sizeof(symbolized_stack));
 		}
 
-		printf("%" PRIu64 "\t%d\t%d\t%" PRIu64, sample.seq, sample.pid,
-		       sample.tid, sample.insn_delta);
-		print_event_values(sample.event_values, schema->event_count);
-		printf("\t%s\t%s\n", sample.top, symbolized_stack);
+		err = append_sample_row(&rows, &count, &cap, &sample, sample.top,
+					symbolized_stack);
+		if (err)
+			goto out;
 	}
 
-	return 0;
+	init_samples_layout(&layout, schema);
+	grow_samples_layout(&layout, rows, count, schema);
+	print_samples_header(&layout, schema);
+	print_samples_separator(&layout, schema);
+	for (i = 0; i < count; ++i)
+		print_samples_row(&rows[i], &layout, schema);
+
+out:
+	free(rows);
+	return err;
 }
 
 static int run_overview_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 			       const struct pmi_report_options *opts,
 			       const struct report_schema *schema)
 {
+	struct table_layout top_layout;
+	struct table_layout stack_layout;
 	struct report_entry *entries = NULL;
 	struct stack_entry *stack_entries = NULL;
 	size_t count = 0;
@@ -588,27 +1016,22 @@ static int run_overview_report(FILE *fp, struct pmi_symbolizer *symbolizer,
 	qsort(stack_entries, stack_count, sizeof(*stack_entries),
 	      compare_stack_entry);
 
-	printf("samples\tinsn_delta");
-	print_event_headers(schema);
-	printf("\ttop\n");
+	init_overview_layout(&top_layout, schema);
+	grow_overview_layout(&top_layout, entries, count, schema);
+	print_overview_header(&top_layout, schema, "top");
+	print_overview_separator(&top_layout, schema, false);
 	for (i = 0; i < count && i < opts->limit; ++i) {
-		printf("%zu\t%" PRIu64, entries[i].sample_count,
-		       entries[i].insn_delta_total);
-		print_event_values(entries[i].event_totals, schema->event_count);
-		printf("\t%s\n", entries[i].top);
+		print_overview_row(&entries[i], &top_layout, schema);
 	}
 
 	if (stack_count > 0) {
 		printf("\nfull stacks\n");
-		printf("samples\tinsn_delta");
-		print_event_headers(schema);
-		printf("\tstack\n");
+		init_overview_layout(&stack_layout, schema);
+		grow_stack_layout(&stack_layout, stack_entries, stack_count, schema);
+		print_overview_header(&stack_layout, schema, "stack");
+		print_overview_separator(&stack_layout, schema, true);
 		for (i = 0; i < stack_count && i < opts->limit; ++i) {
-			printf("%zu\t%" PRIu64, stack_entries[i].sample_count,
-			       stack_entries[i].insn_delta_total);
-			print_event_values(stack_entries[i].event_totals,
-					   schema->event_count);
-			printf("\t%s\n", stack_entries[i].stack);
+			print_stack_row(&stack_entries[i], &stack_layout, schema);
 		}
 	}
 
