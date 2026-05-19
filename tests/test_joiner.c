@@ -73,5 +73,20 @@ int main(void)
 	CHECK(state.sample.bpf.kernel_stack_id == -1);
 
 	pmi_joiner_destroy(joiner);
+
+	memset(&state, 0, sizeof(state));
+	bpf.attach_cookie = 0;
+	err = pmi_joiner_init(&joiner, on_sample, &state);
+	CHECK(err == 0);
+	err = pmi_joiner_push_bpf(joiner, &bpf);
+	CHECK(err == 0);
+	err = pmi_joiner_push_perf(joiner, &perf);
+	CHECK(err == 0);
+	CHECK(state.seen == 1);
+	CHECK(state.sample.perf.tid == perf.tid);
+	CHECK(state.sample.bpf.tid == bpf.tid);
+	CHECK((state.sample.lost_flags & PMI_LOST_JOIN_MISMATCH) == 0);
+
+	pmi_joiner_destroy(joiner);
 	return 0;
 }

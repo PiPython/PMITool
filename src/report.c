@@ -49,6 +49,27 @@ static void normalize_symbol(char *symbol)
 		*plus = '\0';
 }
 
+static char *trim_field(char *field)
+{
+	char *end;
+
+	if (!field)
+		return NULL;
+
+	while (*field == ' ' || *field == '\t')
+		field++;
+	if (*field == '\0')
+		return field;
+
+	end = field + strlen(field) - 1;
+	while (end > field && (*end == ' ' || *end == '\t')) {
+		*end = '\0';
+		end--;
+	}
+
+	return field;
+}
+
 static bool is_hex_fallback(const char *symbol)
 {
 	return symbol && strncmp(symbol, "0x", 2) == 0;
@@ -268,9 +289,13 @@ int pmi_report_main(int argc, char **argv)
 
 		while ((field = strsep(&cursor, "\t")) != NULL && field_count < 10) {
 			field[strcspn(field, "\r\n")] = '\0';
-			fields[field_count++] = field;
+			fields[field_count++] = trim_field(field);
 		}
-		if (field_count != 10 || strcmp(fields[0], "S") != 0)
+		if (field_count != 10)
+			continue;
+		if (strcmp(fields[0], "type") == 0)
+			continue;
+		if (strcmp(fields[0], "S") != 0)
 			continue;
 
 		pid = (pid_t)strtol(fields[4], NULL, 10);

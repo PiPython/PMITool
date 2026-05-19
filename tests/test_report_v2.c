@@ -47,6 +47,8 @@ int main(void)
 	fp = fdopen(input_fd, "w");
 	CHECK(fp != NULL);
 	fprintf(fp, "# pmi raw v2\n");
+	fprintf(fp,
+		"type\tseq\tinsn_total\tinsn_expected\tpid\ttid\tip\tsymbol\tevents\tstack\n");
 	fprintf(fp, "S\t1\t1000000\t1000000\t%d\t%d\t0x%llx\tleaf\tr0010=3,r0011=5\t-\n",
 		getpid(), getpid(), (unsigned long long)ip);
 	fprintf(fp,

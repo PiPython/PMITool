@@ -9,6 +9,7 @@
 #define PMI_JOINER_QUEUE_DEPTH 64
 #define PMI_JOINER_MAX_STREAMS 1024
 #define PMI_TIME_SKEW_NS (10ULL * 1000ULL * 1000ULL)
+#define PMI_TID_STREAM_TAG (1ULL << 63)
 
 struct pmi_perf_queue {
 	struct pmi_perf_sample items[PMI_JOINER_QUEUE_DEPTH];
@@ -35,11 +36,15 @@ struct pmi_joiner {
 
 static uint64_t perf_stream_id(const struct pmi_perf_sample *sample)
 {
+	if (sample->tid > 0)
+		return PMI_TID_STREAM_TAG | (uint32_t)sample->tid;
 	return sample->stream_id;
 }
 
 static uint64_t bpf_stream_id(const struct pmi_bpf_event *event)
 {
+	if (event->tid > 0)
+		return PMI_TID_STREAM_TAG | event->tid;
 	return event->attach_cookie;
 }
 

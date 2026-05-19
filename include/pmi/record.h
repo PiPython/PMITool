@@ -16,6 +16,7 @@ struct pmi_record_options {
 	uint64_t period;
 	enum pmi_stack_mode stack_mode;
 	bool capture_kernel_stack;
+	bool debug_perf;
 	int mmap_pages;
 	int poll_timeout_ms;
 	char raw_event_tokens[PMI_MAX_EVENTS - 1][PMI_MAX_EVENT_NAME];
