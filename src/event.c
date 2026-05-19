@@ -1,16 +1,31 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
+#include <unistd.h>
 
 #include "pmi/event.h"
 #include "pmi/strutil.h"
 
 #define PMI_MAX_FORMAT_RANGES 8
+
+static void set_list_error(struct pmi_event_list *list, const char *fmt, ...)
+{
+	va_list ap;
+
+	if (!list)
+		return;
+
+	va_start(ap, fmt);
+	vsnprintf(list->error, sizeof(list->error), fmt, ap);
+	va_end(ap);
+}
 
 struct pmi_format_field {
 	int target;
@@ -52,6 +67,98 @@ static bool is_blacklisted_pmu(const char *name)
 			return true;
 	}
 	return false;
+}
+
+static bool has_event_format(const char *sysfs_root, const char *pmu)
+{
+	char path[PATH_MAX];
+
+	snprintf(path, sizeof(path), "%s/%s/format/event", sysfs_root, pmu);
+	return access(path, R_OK) == 0;
+}
+
+static int cpu_pmu_priority(const char *name)
+{
+	if (strcmp(name, "cpu") == 0)
+		return 0;
+	if (strncmp(name, "armv8_pmuv3", strlen("armv8_pmuv3")) == 0)
+		return 1;
+	if (strncmp(name, "armv9_pmuv3", strlen("armv9_pmuv3")) == 0)
+		return 2;
+	return -1;
+}
+
+static int detect_cpu_pmu(struct pmi_event_list *list, char *pmu, size_t pmu_cap)
+{
+	DIR *dir;
+	struct dirent *ent;
+	int best_priority = INT_MAX;
+
+	dir = opendir(list->sysfs_root);
+	if (!dir) {
+		set_list_error(list, "open %s failed: %s", list->sysfs_root,
+			      strerror(errno));
+		return -errno;
+	}
+
+	while ((ent = readdir(dir)) != NULL) {
+		int priority;
+
+		if (ent->d_name[0] == '.' || is_blacklisted_pmu(ent->d_name))
+			continue;
+
+		priority = cpu_pmu_priority(ent->d_name);
+		if (priority < 0 || !has_event_format(list->sysfs_root, ent->d_name))
+			continue;
+
+		if (priority < best_priority) {
+			int err = pmi_copy_cstr(pmu, pmu_cap, ent->d_name);
+
+			if (err) {
+				closedir(dir);
+				set_list_error(list, "CPU PMU name too long: %s",
+					      ent->d_name);
+				return err;
+			}
+			best_priority = priority;
+			continue;
+		}
+
+		if (priority == best_priority && strcmp(pmu, ent->d_name) != 0) {
+			closedir(dir);
+			set_list_error(list,
+				      "multiple CPU PMUs matched (%s, %s); need a unique CPU PMU",
+				      pmu, ent->d_name);
+			return -EEXIST;
+		}
+	}
+
+	closedir(dir);
+	if (best_priority == INT_MAX) {
+		set_list_error(list, "need a real CPU PMU; current environment is unavailable");
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
+static int parse_raw_token(const char *token, uint64_t *code)
+{
+	const char *cursor;
+	char *end = NULL;
+
+	if (!token || token[0] != 'r' || token[1] == '\0')
+		return -EINVAL;
+
+	for (cursor = token + 1; *cursor != '\0'; ++cursor) {
+		if (!isxdigit((unsigned char)*cursor))
+			return -EINVAL;
+	}
+
+	*code = strtoull(token + 1, &end, 16);
+	if (!end || *end != '\0')
+		return -EINVAL;
+	return 0;
 }
 
 static int read_pmu_type(const char *sysfs_root, const char *pmu, uint32_t *type)
@@ -286,7 +393,7 @@ static int resolve_alias(struct pmi_event_spec *spec, const char *sysfs_root,
 	return resolve_event_expr(spec, sysfs_root, pmu, alias, expr);
 }
 
-int pmi_event_list_resolve(struct pmi_event_list *list, char *const *inputs,
+int pmi_event_list_resolve(struct pmi_event_list *list, const char *const *inputs,
 			   size_t count, const char *sysfs_root)
 {
 	size_t i;
@@ -311,9 +418,70 @@ int pmi_event_list_resolve(struct pmi_event_list *list, char *const *inputs,
 		else
 			err = resolve_alias(&list->items[list->count],
 					    list->sysfs_root, inputs[i]);
-		if (err)
+		if (err) {
+			set_list_error(list, "failed to resolve event '%s': %s",
+				      inputs[i], strerror(-err));
 			return err;
+		}
 		list->count++;
 	}
+	return 0;
+}
+
+int pmi_event_list_resolve_raw_tokens(struct pmi_event_list *list,
+				      const char *const *tokens, size_t count,
+				      const char *sysfs_root)
+{
+	char pmu[PMI_MAX_PMU_NAME] = "";
+	size_t i;
+	int err;
+
+	if (!list)
+		return -EINVAL;
+
+	memset(list, 0, sizeof(*list));
+	err = pmi_copy_cstr(list->sysfs_root, sizeof(list->sysfs_root),
+			sysfs_root ? sysfs_root : "/sys/bus/event_source/devices");
+	if (err)
+		return err;
+
+	if (count > PMI_MAX_EVENTS - 1) {
+		set_list_error(list, "too many raw events: %zu", count);
+		return -E2BIG;
+	}
+
+	err = detect_cpu_pmu(list, pmu, sizeof(pmu));
+	if (err)
+		return err;
+
+	for (i = 0; i < count; ++i) {
+		uint64_t raw_code;
+		char expr[64];
+
+		err = parse_raw_token(tokens[i], &raw_code);
+		if (err) {
+			set_list_error(list, "invalid raw event token: %s",
+				      tokens[i] ? tokens[i] : "(null)");
+			return err;
+		}
+
+		snprintf(expr, sizeof(expr), "event=0x%" PRIx64, raw_code);
+		err = resolve_event_expr(&list->items[list->count], list->sysfs_root,
+					 pmu, tokens[i], expr);
+		if (err) {
+			if (err == -ENOENT) {
+				set_list_error(list,
+					      "raw event %s is not accepted by CPU PMU %s",
+					      tokens[i], pmu);
+			} else {
+				set_list_error(list,
+					      "failed to resolve raw event %s on CPU PMU %s: %s",
+					      tokens[i], pmu, strerror(-err));
+			}
+			return err;
+		}
+		list->count++;
+	}
+
 	return 0;
 }

@@ -11,6 +11,7 @@
 #define PMI_MAX_SYMBOL_LEN 256
 #define PMI_MAX_MODULE_LEN 256
 #define PMI_MAX_FOLDED_LEN 2048
+#define PMI_MAX_STACK_TEXT_LEN 4096
 #define PMI_MAX_LINE_LEN 4096
 
 enum pmi_stack_mode {

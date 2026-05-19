@@ -60,5 +60,18 @@ int main(void)
 	CHECK((state.sample.lost_flags & PMI_LOST_JOIN_MISMATCH) == 0);
 
 	pmi_joiner_destroy(joiner);
+
+	memset(&state, 0, sizeof(state));
+	err = pmi_joiner_init(&joiner, on_sample, &state);
+	CHECK(err == 0);
+	err = pmi_joiner_push_perf(joiner, &perf);
+	CHECK(err == 0);
+	err = pmi_joiner_flush(joiner);
+	CHECK(err == 0);
+	CHECK(state.seen == 1);
+	CHECK(state.sample.bpf.user_stack_id == -1);
+	CHECK(state.sample.bpf.kernel_stack_id == -1);
+
+	pmi_joiner_destroy(joiner);
 	return 0;
 }

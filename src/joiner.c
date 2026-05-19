@@ -67,6 +67,8 @@ static int emit_joined(struct pmi_joiner *joiner,
 	struct pmi_joined_sample sample;
 
 	memset(&sample, 0, sizeof(sample));
+	sample.bpf.user_stack_id = -1;
+	sample.bpf.kernel_stack_id = -1;
 	if (perf)
 		sample.perf = *perf;
 	if (bpf)

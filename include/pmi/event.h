@@ -19,11 +19,15 @@ struct pmi_event_spec {
 
 struct pmi_event_list {
 	char sysfs_root[PATH_MAX];
+	char error[256];
 	struct pmi_event_spec items[PMI_MAX_EVENTS - 1];
 	size_t count;
 };
 
-int pmi_event_list_resolve(struct pmi_event_list *list, char *const *inputs,
+int pmi_event_list_resolve(struct pmi_event_list *list, const char *const *inputs,
 			   size_t count, const char *sysfs_root);
+int pmi_event_list_resolve_raw_tokens(struct pmi_event_list *list,
+				      const char *const *tokens, size_t count,
+				      const char *sysfs_root);
 
 #endif
