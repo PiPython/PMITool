@@ -10,6 +10,7 @@
 
 #define PMI_OUTPUT_QUEUE_CAPACITY 4096
 
+/* 这是从采样热路径复制出来的轻量对象，避免 writer 线程再回看 perf 结构。 */
 struct pmi_output_sample {
 	pid_t pid;
 	pid_t tid;
@@ -20,6 +21,7 @@ struct pmi_output_sample {
 	size_t event_count;
 };
 
+/* writer 线程负责批量 TSV 落盘，主线程只做入队，尽量少阻塞采样。 */
 struct pmi_output_writer {
 	FILE *fp;
 	char *file_buffer;

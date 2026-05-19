@@ -65,6 +65,9 @@ static const char *perf_record_type_name(uint32_t type)
 	}
 }
 
+/* perf 的 callchain 里会插入 PERF_CONTEXT_* 标记，用来分隔 user/kernel/hv 上下文。
+ * 这些值不是可符号化地址，解码时必须主动过滤掉。
+ */
 static bool is_perf_context_marker(uint64_t ip)
 {
 	switch (ip) {
@@ -107,6 +110,7 @@ static bool should_log_empty_drain(uint64_t empty_drains)
 	       (empty_drains % PMI_EMPTY_DRAIN_LOG_INTERVAL) == 0;
 }
 
+/* perf mmap ring 是环形缓冲区，record 跨越尾部时需要手动处理 wrap-around。 */
 static int copy_from_ring(void *dst, size_t cap, const char *base, size_t size,
 			  uint64_t offset, size_t len)
 {
@@ -123,6 +127,7 @@ static int copy_from_ring(void *dst, size_t cap, const char *base, size_t size,
 	return 0;
 }
 
+/* PERF_SAMPLE_READ 和同步 read(leader_fd) 共用同一套 group-read 解析逻辑。 */
 static int parse_group_read_impl(const struct pmi_perf_session *session,
 				 const void *data, size_t len,
 				 struct pmi_perf_group_snapshot *snapshot)
@@ -183,6 +188,7 @@ int pmi_perf_parse_group_read(const void *data, size_t len,
 	return parse_group_read_impl(NULL, data, len, snapshot);
 }
 
+/* 当 ring 里没有 sample 时，用 read() 快照判断到底是计数没涨，还是 sample 没进 ring。 */
 static int read_group_snapshot(const struct pmi_perf_session *session,
 			       struct pmi_perf_group_snapshot *snapshot)
 {
@@ -211,6 +217,7 @@ static int read_group_snapshot(const struct pmi_perf_session *session,
 	return parse_group_read_impl(session, raw, (size_t)got, snapshot);
 }
 
+/* empty-drain 诊断只在 debug 模式启用，不参与正常采样路径。 */
 static int debug_empty_drain_snapshot(struct pmi_perf_session *session)
 {
 	struct pmi_perf_group_snapshot snapshot;
@@ -283,6 +290,9 @@ static void fill_sample_names(struct pmi_perf_session *session,
 {
 	size_t i, j;
 
+	/* slot 0 固定是 instructions，slot 1..N 对应 -e 输入顺序。
+	 * 这里优先沿用顺序，再用 id 做一致性校验和 debug。
+	 */
 	for (i = 0; i < sample->event_count; ++i) {
 		if (i < session->event_count) {
 			pmi_copy_cstr_trunc(sample->event_names[i],
@@ -324,6 +334,7 @@ static void compute_sample_deltas(struct pmi_perf_session *session,
 	if (!session || !sample)
 		return;
 
+	/* delta 在 perf session 内部完成，output 只负责消费结果和写盘。 */
 	for (i = 0; i < sample->event_count; ++i) {
 		uint64_t current = sample->events[i].value;
 		uint64_t delta = current;
@@ -352,6 +363,7 @@ static int open_event(struct pmi_perf_session *session, int group_fd, pid_t tid,
 {
 	struct perf_event_attr attr = *tmpl;
 
+	/* leader 负责按 retired instructions 触发 sample，sibling 只负责 group read 附带计数。 */
 	opened->fd = sys_perf_event_open(&attr, tid, -1, group_fd, 0);
 	if (opened->fd < 0) {
 		perf_debugf(session, "error",
@@ -385,6 +397,9 @@ static int pmi_perf_decode_sample_impl(const struct pmi_perf_session *session,
 	size_t i;
 
 	memset(sample, 0, sizeof(*sample));
+	/* 这里必须严格按 perf_event_open 规定的 sample_type 字段顺序解码，
+	 * 顺序一旦错位，后面的 READ / STREAM_ID / CALLCHAIN 都会整体错掉。
+	 */
 
 	if (sample_type & PERF_SAMPLE_IP) {
 		if ((size_t)(end - cursor) < sizeof(uint64_t))
@@ -560,6 +575,11 @@ int pmi_perf_session_open(struct pmi_perf_session *session, pid_t tid,
 	int err;
 
 	memset(session, 0, sizeof(*session));
+	/* 一个 tid 对应一个 perf session：
+	 * - 一个 leader event
+	 * - 若干 sibling event
+	 * - 一个 mmap ring
+	 */
 	session->tid = tid;
 	session->debug_perf = opts->debug_perf;
 	session->sample_period = leader.sample_period;
@@ -677,6 +697,12 @@ int pmi_perf_session_enable(struct pmi_perf_session *session)
 	return 0;
 }
 
+/* drain 是 perf 用户态消费主入口：
+ * - 从 mmap ring 取 record
+ * - 解码 sample / lost
+ * - 补齐 delta 和事件名
+ * - 交给 record 层进入异步 writer
+ */
 int pmi_perf_session_drain(struct pmi_perf_session *session, pmi_perf_sample_cb cb,
 			   void *ctx)
 {
@@ -765,6 +791,7 @@ int pmi_perf_session_drain(struct pmi_perf_session *session, pmi_perf_sample_cb 
 				    sample.stream_id, sample.ip, sample.event_count,
 				    sample.callchain_count);
 			if (sample.event_count > 0) {
+				/* 这几项状态既服务后续 delta，也服务 empty-drain 异常诊断。 */
 				session->last_leader_count = sample.events[0].value;
 				session->last_sample_leader_count = sample.events[0].value;
 				session->last_time_enabled = sample.events[0].time_enabled;

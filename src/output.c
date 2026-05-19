@@ -12,6 +12,7 @@
 #define PMI_OUTPUT_STAGE_BUFFER_SIZE (1U << 16)
 #define PMI_OUTPUT_BATCH_SIZE 64
 
+/* raw 文件是 TSV，字段里不能直接带制表符或换行，否则 report 无法稳定解析。 */
 static void sanitize_field(const char *src, char *dst, size_t cap)
 {
 	size_t i;
@@ -35,6 +36,7 @@ static void sanitize_field(const char *src, char *dst, size_t cap)
 	dst[j] = '\0';
 }
 
+/* full stack 模式下 raw 里只写地址尾帧，叶子地址单独放在 top_ip。 */
 static size_t format_stack_ips(const struct pmi_output_sample *sample, char *out,
 			       size_t out_cap)
 {
@@ -110,6 +112,7 @@ static int format_sample_line(struct pmi_output_writer *writer,
 	if (!writer || !sample || !line || !line_len)
 		return -EINVAL;
 
+	/* record 阶段坚持只落地址，避免把符号化成本重新带回热路径。 */
 	if (sample->top_ip != 0)
 		snprintf(top, sizeof(top), "0x%" PRIx64, sample->top_ip);
 	else
@@ -185,6 +188,11 @@ static int flush_stage(FILE *fp, const char *buf, size_t len)
 	return 0;
 }
 
+/* writer 线程是整个低开销化的核心：
+ * - 主线程只负责入队
+ * - writer 批量拼接 TSV 并集中写盘
+ * 这样既减少热路径字符串格式化，也降低频繁 fwrite 的系统调用成本。
+ */
 static void *writer_thread_main(void *arg)
 {
 	struct pmi_output_writer *writer = arg;
@@ -302,6 +310,7 @@ int pmi_output_open(struct pmi_output_writer *writer, const char *path,
 	}
 
 	if (events) {
+		/* 动态事件列的表头直接固定为用户输入顺序，report 也据此驱动解析。 */
 		writer->event_count = events->count;
 		for (i = 0; i < events->count; ++i) {
 			sanitize_field(events->items[i].name, writer->event_names[i],
@@ -345,6 +354,7 @@ int pmi_output_enqueue_sample(struct pmi_output_writer *writer,
 	while (writer->count == PMI_OUTPUT_QUEUE_CAPACITY &&
 	       writer->worker_err == 0 && !writer->closing) {
 		if (writer->write_mode == PMI_WRITE_LOW_OVERHEAD) {
+			/* low-overhead 模式优先保护业务线程，不让采样主线程因为写盘阻塞。 */
 			writer->dropped_samples++;
 			pthread_mutex_unlock(&writer->mutex);
 			return 0;
@@ -371,6 +381,7 @@ int pmi_output_close(struct pmi_output_writer *writer)
 		return -EINVAL;
 
 	if (writer->thread_started) {
+		/* 关闭时先通知 writer 停止接新活，再 join 等它 flush 完队列。 */
 		pthread_mutex_lock(&writer->mutex);
 		writer->closing = true;
 		pthread_cond_broadcast(&writer->not_empty);

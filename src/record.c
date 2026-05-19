@@ -29,6 +29,11 @@
 
 static volatile sig_atomic_t g_stop;
 
+/* record 的运行时状态尽量简单：
+ * - perf session 负责采样和 delta 计算
+ * - output writer 负责异步写盘
+ * - 这里只做目标管理和主循环调度
+ */
 struct record_runtime {
 	struct pmi_record_options opts;
 	struct pmi_event_list events;
@@ -118,6 +123,9 @@ static int on_perf_sample(const struct pmi_perf_sample *sample, void *ctx)
 	if (!sample)
 		return 0;
 
+	/* 采样热路径只做地址提取和浅拷贝，不做符号化。
+	 * 人类可读的函数名统一放到 report 阶段离线处理。
+	 */
 	if (rt->opts.stack_mode == PMI_STACK_TOP) {
 		top_ip = sample->ip;
 	} else if (rt->opts.stack_mode == PMI_STACK_FULL) {
@@ -166,6 +174,7 @@ static int attach_tid(struct record_runtime *rt, pid_t tid)
 	return 0;
 }
 
+/* 进程模式会周期性补挂新线程；已存在的 tid 会被 session_exists 去重。 */
 static int attach_target_threads(struct record_runtime *rt, pid_t pid)
 {
 	struct pmi_tid_list tids;
@@ -183,6 +192,9 @@ static int attach_target_threads(struct record_runtime *rt, pid_t pid)
 	return 0;
 }
 
+/* --cmd 模式先让子进程 SIGSTOP，等父进程 attach 完所有 perf fd 后再 SIGCONT，
+ * 避免程序最热的启动阶段完全跑在采样之外。
+ */
 static int spawn_command(const char *cmd, pid_t *pid_out)
 {
 	pid_t child;
@@ -412,6 +424,11 @@ static int parse_record_options(int argc, char **argv, struct pmi_record_options
 	return 0;
 }
 
+/* 关闭顺序必须反过来：
+ * 1. 先把 perf ring 里剩余 sample drain 出来
+ * 2. 再关闭 session
+ * 3. 最后等待异步 writer flush 完
+ */
 static void close_runtime(struct record_runtime *rt)
 {
 	size_t i;
@@ -494,6 +511,7 @@ int pmi_record_main(int argc, char **argv)
 	if (rt.opts.raw_event_count > 0) {
 		for (i = 0; i < rt.opts.raw_event_count; ++i)
 			raw_event_ptrs[i] = rt.opts.raw_event_tokens[i];
+		/* 只支持 CPU core PMU raw event，避免把 uncore / trace 类事件混进来。 */
 		err = pmi_event_list_resolve_raw_tokens(&rt.events, raw_event_ptrs,
 							rt.opts.raw_event_count,
 							"/sys/bus/event_source/devices");
@@ -551,6 +569,7 @@ int pmi_record_main(int argc, char **argv)
 			nfds++;
 		}
 
+		/* 主循环只 drain poll() 标记为 ready 的 session，避免无意义地扫空 ring。 */
 		poll(fds, nfds, timeout_ms);
 		for (i = 0; i < rt.session_count; ++i) {
 			if ((fds[i].revents & (POLLIN | POLLERR | POLLHUP)) == 0)
@@ -572,6 +591,7 @@ int pmi_record_main(int argc, char **argv)
 
 		now_ms = monotonic_ms();
 		if ((rt.opts.pid || rt.opts.cmd) && now_ms >= next_refresh_ms) {
+			/* 线程刷新降频到 1s 一次，避免对 /proc/<pid>/task 的高频扫描。 */
 			attach_target_threads(&rt, rt.target_pid);
 			next_refresh_ms = now_ms + PMI_THREAD_REFRESH_INTERVAL_MS;
 		}
