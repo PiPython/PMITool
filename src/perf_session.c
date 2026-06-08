@@ -304,44 +304,48 @@ static int debug_empty_drain_snapshot(struct pmi_perf_session *session)
 	return 0;
 }
 
-static void fill_sample_names(struct pmi_perf_session *session,
-			      struct pmi_perf_sample *sample)
+static void normalize_sample_events(struct pmi_perf_session *session,
+				    struct pmi_perf_sample *sample)
 {
+	struct pmi_event_value decoded[PMI_MAX_EVENTS];
+	size_t decoded_count;
 	size_t i, j;
 
 	/* slot 0 固定是 instructions，slot 1..N 对应 -e 输入顺序。
-	 * 这里优先沿用顺序，再用 id 做一致性校验和 debug。
+	 * PERF_SAMPLE_READ 理论上按 group 顺序返回，但这里仍按 id 重排一次，
+	 * 避免内核返回顺序或异常样本导致 insn_delta/events 列错位。
 	 */
-	for (i = 0; i < sample->event_count; ++i) {
-		if (i < session->event_count) {
-			pmi_copy_cstr_trunc(sample->event_names[i],
-					    sizeof(sample->event_names[i]),
-					    session->events[i].name);
-		} else {
-			snprintf(sample->event_names[i], sizeof(sample->event_names[i]),
-				 "event%zu", i);
-		}
-		for (j = 0; j < session->event_count; ++j) {
-			if (session->events[j].id == sample->events[i].id) {
-				if (j != i) {
-					perf_debugf(session, "read",
-						    "tid=%d slot=%zu sample_id=%" PRIu64 " expected_slot=%zu expected_id=%" PRIu64 " resolved_name=%s id mismatch",
-						    session->tid, i,
-						    (uint64_t)sample->events[i].id, j,
-						    (uint64_t)session->events[j].id,
-						    session->events[j].name);
-				}
-				pmi_copy_cstr_trunc(sample->event_names[i],
-						    sizeof(sample->event_names[i]),
-						    session->events[j].name);
+	memcpy(decoded, sample->events, sizeof(decoded));
+	decoded_count = sample->event_count;
+	memset(sample->events, 0, sizeof(sample->events));
+	memset(sample->event_names, 0, sizeof(sample->event_names));
+	sample->event_count = session->event_count;
+
+	for (i = 0; i < session->event_count; ++i) {
+		bool matched = false;
+
+		pmi_copy_cstr_trunc(sample->event_names[i],
+				    sizeof(sample->event_names[i]),
+				    session->events[i].name);
+		for (j = 0; j < decoded_count; ++j) {
+			if (decoded[j].id == session->events[i].id) {
+				sample->events[i] = decoded[j];
+				matched = true;
 				break;
 			}
 		}
+		if (!matched) {
+			perf_debugf(session, "read",
+				    "tid=%d slot=%zu expected_name=%s expected_id=%" PRIu64 " sample read id not found; value forced to 0",
+				    session->tid, i, session->events[i].name,
+				    (uint64_t)session->events[i].id);
+		}
 		perf_debugf(session, "read",
-			    "tid=%d slot=%zu sample_id=%" PRIu64 " expected_id=%" PRIu64 " resolved_name=%s value=%" PRIu64,
-			    session->tid, i, (uint64_t)sample->events[i].id,
-			    i < session->event_count ? (uint64_t)session->events[i].id : 0,
-			    sample->event_names[i], (uint64_t)sample->events[i].value);
+			    "tid=%d slot=%zu expected_name=%s expected_id=%" PRIu64 " sample_id=%" PRIu64 " value=%" PRIu64,
+			    session->tid, i, sample->event_names[i],
+			    (uint64_t)session->events[i].id,
+			    (uint64_t)sample->events[i].id,
+			    (uint64_t)sample->events[i].value);
 	}
 }
 
@@ -828,6 +832,7 @@ int pmi_perf_session_drain(struct pmi_perf_session *session, pmi_perf_sample_cb 
 				    session->tid, sample.pid, sample.tid, sample.cpu,
 				    sample.stream_id, sample.ip, sample.event_count,
 				    sample.callchain_count);
+			normalize_sample_events(session, &sample);
 			if (sample.event_count > 0) {
 				/* 这几项状态既服务后续 delta，也服务 empty-drain 异常诊断。 */
 				session->last_leader_count = sample.events[0].value;
@@ -837,7 +842,6 @@ int pmi_perf_session_drain(struct pmi_perf_session *session, pmi_perf_sample_cb 
 				session->missing_periods_reported = 0;
 			}
 			compute_sample_deltas(session, &sample);
-			fill_sample_names(session, &sample);
 			err = cb(&sample, ctx);
 			if (err) {
 				perf_debugf(session, "error",
