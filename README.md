@@ -7,6 +7,7 @@
 - 仅支持 Linux
 - 按指令周期采样，默认每退休 `1,000,000` 条指令采一次
 - 支持来自 CPU core PMU 的原始 sibling 事件（`-e r0010,r0011`）
+- 支持按 CPU 列表或范围做 system-wide 采样（`-C 1-4`、`-C 0,2-4,7`）
 - 在 `--stack full` 模式下使用 `perf` 采集调用链
 - 支持原始样本落盘与函数级报表生成
 - `record` 默认使用低开销异步 writer，尽量减少对业务线程的阻塞
@@ -72,6 +73,18 @@ sudo ./build/pmi record -c 'taskset -c 0 ./bench' -s top -o samples.pmi
 
 ```bash
 sudo ./build/pmi record -c './bench' -n 100000 -e r0010,r0011 -s full -o samples.pmi
+```
+
+按 CPU 范围采样，并把多个 CPU 的 sample 直接合并为同一个 raw 流：
+
+```bash
+sudo ./build/pmi record -C 1-4 -n 100000 -o samples.pmi
+```
+
+CPU 列表可以混合单点和范围，重复 CPU 会自动去重：
+
+```bash
+sudo ./build/pmi record -C 0,2-4,7 -e r0010,r0011 -s top -o samples.pmi
 ```
 
 使用严格写出模式，尽量不丢 userspace 样本：
@@ -149,7 +162,9 @@ S <seq> <insn_delta> <pid> <tid> <r0010> <r0011> <top> <stack>
 - `stack`：在未指定 `-s` 或指定 `-s top` 时为 `-`；在 `-s full` 时，
   记录叶子帧之后剩余的原始调用链 IP，例如 `0xaaa;0xbbb`
 
-对每个 `tid` 来说，第一条样本会直接把当前计数器值写成 delta。
+对每个采样 session 来说，第一条样本会直接把当前计数器值写成 delta。
+在 `-p/-t/-c` 模式下 session 对应 tid；在 `-C` 模式下 session 对应 CPU。
+CPU 模式的多个 session 会合并成一个输出流，不额外输出 CPU 列。
 
 文件头固定为：
 
@@ -165,6 +180,8 @@ raw 文件始终保持 TSV，不做对齐；只有 `report` 会做对齐后的�
 - 仅支持 Linux/arm64
 - 仅支持 CPU core PMU 的原始事件
 - `-e` 依赖真实 CPU PMU；没有 CPU PMU 的虚拟环境会直接失败
+- `record -C` 是 system-wide per-CPU 采样，会采到指定 CPU 上运行的所有任务；
+  该模式通常需要 root、`CAP_PERFMON` 或较低的 `perf_event_paranoid`
 - `record --pid` 会周期性刷新线程列表，但不会在进程退出后保留完整的
   symbol/mmap 历史
 - `record --pid` 和 `record --cmd` 默认每 `1000ms` 刷新一次线程列表

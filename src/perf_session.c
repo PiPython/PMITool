@@ -104,6 +104,25 @@ static int sys_perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu,
 	return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
 }
 
+struct pmi_perf_open_args pmi_perf_target_open_args(struct pmi_perf_target target)
+{
+	struct pmi_perf_open_args args = { .pid = -1, .cpu = -1 };
+
+	if (target.type == PMI_PERF_TARGET_CPU) {
+		args.pid = -1;
+		args.cpu = target.cpu;
+	} else {
+		args.pid = target.tid;
+		args.cpu = -1;
+	}
+	return args;
+}
+
+static const char *target_type_name(enum pmi_perf_target_type type)
+{
+	return type == PMI_PERF_TARGET_CPU ? "cpu" : "tid";
+}
+
 static bool should_log_empty_drain(uint64_t empty_drains)
 {
 	return empty_drains <= 3 ||
@@ -357,18 +376,23 @@ static void compute_sample_deltas(struct pmi_perf_session *session,
 	session->have_prev_values = true;
 }
 
-static int open_event(struct pmi_perf_session *session, int group_fd, pid_t tid,
+static int open_event(struct pmi_perf_session *session, int group_fd,
+		      struct pmi_perf_target target,
 		      const struct perf_event_attr *tmpl,
 		      struct pmi_opened_event *opened)
 {
 	struct perf_event_attr attr = *tmpl;
+	struct pmi_perf_open_args open_args = pmi_perf_target_open_args(target);
 
 	/* leader 负责按 retired instructions 触发 sample，sibling 只负责 group read 附带计数。 */
-	opened->fd = sys_perf_event_open(&attr, tid, -1, group_fd, 0);
+	opened->fd = sys_perf_event_open(&attr, open_args.pid, open_args.cpu, group_fd,
+					 0);
 	if (opened->fd < 0) {
 		perf_debugf(session, "error",
-			    "tid=%d stage=open group_fd=%d type=%u config=0x%" PRIx64 " config1=0x%" PRIx64 " config2=0x%" PRIx64 " period=%" PRIu64 " sample_type=0x%" PRIx64 " read_format=0x%" PRIx64 " errno=%d (%s)",
-			    tid, group_fd, attr.type, (uint64_t)attr.config,
+			    "target=%s tid=%d cpu=%d pid_arg=%d cpu_arg=%d stage=open group_fd=%d type=%u config=0x%" PRIx64 " config1=0x%" PRIx64 " config2=0x%" PRIx64 " period=%" PRIu64 " sample_type=0x%" PRIx64 " read_format=0x%" PRIx64 " errno=%d (%s)",
+			    target_type_name(target.type), target.tid, target.cpu,
+			    open_args.pid, open_args.cpu, group_fd, attr.type,
+			    (uint64_t)attr.config,
 			    (uint64_t)attr.config1, (uint64_t)attr.config2,
 			    (uint64_t)attr.sample_period,
 			    (uint64_t)attr.sample_type,
@@ -377,8 +401,9 @@ static int open_event(struct pmi_perf_session *session, int group_fd, pid_t tid,
 	}
 	if (ioctl(opened->fd, PERF_EVENT_IOC_ID, &opened->id) != 0) {
 		perf_debugf(session, "error",
-			    "tid=%d stage=event-id fd=%d errno=%d (%s)",
-			    tid, opened->fd, errno, strerror(errno));
+			    "target=%s tid=%d cpu=%d stage=event-id fd=%d errno=%d (%s)",
+			    target_type_name(target.type), target.tid, target.cpu,
+			    opened->fd, errno, strerror(errno));
 		close(opened->fd);
 		opened->fd = -1;
 		return -errno;
@@ -547,7 +572,8 @@ int pmi_perf_decode_sample(const void *data, size_t len, uint64_t sample_type,
 	return pmi_perf_decode_sample_impl(NULL, data, len, sample_type, sample);
 }
 
-int pmi_perf_session_open(struct pmi_perf_session *session, pid_t tid,
+int pmi_perf_session_open(struct pmi_perf_session *session,
+			  struct pmi_perf_target target,
 			  const struct pmi_record_options *opts,
 			  const struct pmi_event_list *events)
 {
@@ -575,12 +601,14 @@ int pmi_perf_session_open(struct pmi_perf_session *session, pid_t tid,
 	int err;
 
 	memset(session, 0, sizeof(*session));
-	/* 一个 tid 对应一个 perf session：
+	/* 一个采样目标对应一个 perf session：
 	 * - 一个 leader event
 	 * - 若干 sibling event
 	 * - 一个 mmap ring
 	 */
-	session->tid = tid;
+	session->target_type = target.type;
+	session->tid = target.type == PMI_PERF_TARGET_TID ? target.tid : -1;
+	session->cpu = target.type == PMI_PERF_TARGET_CPU ? target.cpu : -1;
 	session->debug_perf = opts->debug_perf;
 	session->sample_period = leader.sample_period;
 	if (opts->stack_mode == PMI_STACK_FULL)
@@ -595,14 +623,15 @@ int pmi_perf_session_open(struct pmi_perf_session *session, pid_t tid,
 		 "instructions");
 	session->events[0].type = PERF_TYPE_HARDWARE;
 	session->events[0].config = PERF_COUNT_HW_INSTRUCTIONS;
-	err = open_event(session, -1, tid, &leader, &session->events[0]);
+	err = open_event(session, -1, target, &leader, &session->events[0]);
 	if (err)
 		goto fail;
 	session->leader_fd = session->events[0].fd;
 	session->event_count = 1;
 	perf_debugf(session, "open",
-		    "tid=%d opened slot=0 name=%s fd=%d id=%" PRIu64 " type=%u config=0x%" PRIx64 " sample_period=%" PRIu64 " sample_type=0x%" PRIx64 " read_format=0x%" PRIx64 " exclude_kernel=%u disabled=%u wakeup_events=%u",
-		    tid, session->events[0].name, session->events[0].fd,
+		    "target=%s tid=%d cpu=%d opened slot=0 name=%s fd=%d id=%" PRIu64 " type=%u config=0x%" PRIx64 " sample_period=%" PRIu64 " sample_type=0x%" PRIx64 " read_format=0x%" PRIx64 " exclude_kernel=%u disabled=%u wakeup_events=%u",
+		    target_type_name(target.type), target.tid, target.cpu,
+		    session->events[0].name, session->events[0].fd,
 		    (uint64_t)session->events[0].id, session->events[0].type,
 		    (uint64_t)session->events[0].config,
 		    (uint64_t)leader.sample_period, (uint64_t)leader.sample_type,
@@ -627,13 +656,14 @@ int pmi_perf_session_open(struct pmi_perf_session *session, pid_t tid,
 			 events->items[i].name);
 		session->events[session->event_count].type = sibling.type;
 		session->events[session->event_count].config = sibling.config;
-		err = open_event(session, session->leader_fd, tid, &sibling,
+		err = open_event(session, session->leader_fd, target, &sibling,
 				 &session->events[session->event_count]);
 		if (err)
 			goto fail;
 		perf_debugf(session, "open",
-			    "tid=%d opened slot=%zu name=%s fd=%d id=%" PRIu64 " type=%u config=0x%" PRIx64,
-			    tid, session->event_count,
+			    "target=%s tid=%d cpu=%d opened slot=%zu name=%s fd=%d id=%" PRIu64 " type=%u config=0x%" PRIx64,
+			    target_type_name(target.type), target.tid, target.cpu,
+			    session->event_count,
 			    session->events[session->event_count].name,
 			    session->events[session->event_count].fd,
 			    (uint64_t)session->events[session->event_count].id,
@@ -645,8 +675,9 @@ int pmi_perf_session_open(struct pmi_perf_session *session, pid_t tid,
 	if (ioctl(session->leader_fd, PERF_EVENT_IOC_ID, &session->stream_id) != 0) {
 		err = -errno;
 		perf_debugf(session, "error",
-			    "tid=%d stage=stream-id fd=%d errno=%d (%s)",
-			    tid, session->leader_fd, errno, strerror(errno));
+			    "target=%s tid=%d cpu=%d stage=stream-id fd=%d errno=%d (%s)",
+			    target_type_name(target.type), target.tid, target.cpu,
+			    session->leader_fd, errno, strerror(errno));
 		goto fail;
 	}
 
@@ -657,16 +688,18 @@ int pmi_perf_session_open(struct pmi_perf_session *session, pid_t tid,
 		session->mmap_base = NULL;
 		err = -errno;
 		perf_debugf(session, "error",
-			    "tid=%d stage=mmap fd=%d mmap_len=%zu errno=%d (%s)",
-			    tid, session->leader_fd, session->mmap_len, errno,
-			    strerror(errno));
+			    "target=%s tid=%d cpu=%d stage=mmap fd=%d mmap_len=%zu errno=%d (%s)",
+			    target_type_name(target.type), target.tid, target.cpu,
+			    session->leader_fd, session->mmap_len, errno, strerror(errno));
 		goto fail;
 	}
 
-	if (pmi_procfs_read_comm(tid, session->comm)) {
-		snprintf(session->comm, sizeof(session->comm), "%d", tid);
+	if (target.type == PMI_PERF_TARGET_CPU) {
+		snprintf(session->comm, sizeof(session->comm), "cpu%d", target.cpu);
+	} else if (pmi_procfs_read_comm(target.tid, session->comm)) {
+		snprintf(session->comm, sizeof(session->comm), "%d", target.tid);
 		perf_debugf(session, "open",
-			    "tid=%d comm-read failed; fallback comm=%s", tid,
+			    "tid=%d comm-read failed; fallback comm=%s", target.tid,
 			    session->comm);
 	}
 	return 0;
@@ -682,18 +715,22 @@ int pmi_perf_session_enable(struct pmi_perf_session *session)
 		return -EINVAL;
 	if (ioctl(session->leader_fd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP) != 0) {
 		perf_debugf(session, "error",
-			    "tid=%d stage=reset fd=%d errno=%d (%s)",
-			    session->tid, session->leader_fd, errno, strerror(errno));
+			    "target=%s tid=%d cpu=%d stage=reset fd=%d errno=%d (%s)",
+			    target_type_name(session->target_type), session->tid,
+			    session->cpu, session->leader_fd, errno, strerror(errno));
 		return -errno;
 	}
 	if (ioctl(session->leader_fd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP) != 0) {
 		perf_debugf(session, "error",
-			    "tid=%d stage=enable fd=%d errno=%d (%s)",
-			    session->tid, session->leader_fd, errno, strerror(errno));
+			    "target=%s tid=%d cpu=%d stage=enable fd=%d errno=%d (%s)",
+			    target_type_name(session->target_type), session->tid,
+			    session->cpu, session->leader_fd, errno, strerror(errno));
 		return -errno;
 	}
-	perf_debugf(session, "enable", "tid=%d fd=%d group_events=%zu",
-		    session->tid, session->leader_fd, session->event_count);
+	perf_debugf(session, "enable",
+		    "target=%s tid=%d cpu=%d fd=%d group_events=%zu",
+		    target_type_name(session->target_type), session->tid,
+		    session->cpu, session->leader_fd, session->event_count);
 	return 0;
 }
 
@@ -728,8 +765,9 @@ int pmi_perf_session_drain(struct pmi_perf_session *session, pmi_perf_sample_cb 
 	}
 	session->empty_drains = 0;
 	perf_debugf(session, "drain",
-		    "tid=%d head=%" PRIu64 " tail=%" PRIu64 " size=%" PRIu64,
-		    session->tid, head, tail, size);
+		    "target=%s tid=%d cpu=%d head=%" PRIu64 " tail=%" PRIu64 " size=%" PRIu64,
+		    target_type_name(session->target_type), session->tid, session->cpu,
+		    head, tail, size);
 
 	while (tail < head) {
 		struct perf_event_header hdr;

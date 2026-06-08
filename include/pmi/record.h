@@ -8,6 +8,8 @@
 
 #include "pmi/shared.h"
 
+#define PMI_MAX_RECORD_TARGETS 1024
+
 enum pmi_write_mode {
 	PMI_WRITE_LOW_OVERHEAD = 0,
 	PMI_WRITE_STRICT = 1,
@@ -26,6 +28,8 @@ struct pmi_record_options {
 	bool debug_perf;
 	int mmap_pages;
 	int poll_timeout_ms;
+	int cpus[PMI_MAX_RECORD_TARGETS];
+	size_t cpu_count;
 	char raw_event_tokens[PMI_MAX_EVENTS - 1][PMI_MAX_EVENT_NAME];
 	size_t raw_event_count;
 };
@@ -48,5 +52,6 @@ struct pmi_report_options {
 
 int pmi_record_main(int argc, char **argv);
 int pmi_report_main(int argc, char **argv);
+int pmi_record_parse_cpu_set(const char *arg, int *cpus, size_t cap, size_t *count);
 
 #endif

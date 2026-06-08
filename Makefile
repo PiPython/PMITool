@@ -30,6 +30,7 @@ OBJ := $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(SRC))
 TEST_SRC := \
 	tests/test_event.c \
 	tests/test_perf_decode.c \
+	tests/test_record_cpu.c \
 	tests/test_symbolizer.c \
 	tests/test_output_v3.c \
 	tests/test_report_v3.c

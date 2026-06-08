@@ -46,9 +46,27 @@ struct pmi_opened_event {
 	uint64_t config;
 };
 
-/* 一个 tid 对应一个 perf session，封装 leader/group fd、mmap ring 和诊断状态。 */
-struct pmi_perf_session {
+enum pmi_perf_target_type {
+	PMI_PERF_TARGET_TID = 0,
+	PMI_PERF_TARGET_CPU = 1,
+};
+
+struct pmi_perf_target {
+	enum pmi_perf_target_type type;
 	pid_t tid;
+	int cpu;
+};
+
+struct pmi_perf_open_args {
+	pid_t pid;
+	int cpu;
+};
+
+/* 一个采样目标对应一个 perf session，封装 leader/group fd、mmap ring 和诊断状态。 */
+struct pmi_perf_session {
+	enum pmi_perf_target_type target_type;
+	pid_t tid;
+	int cpu;
 	int leader_fd;
 	void *mmap_base;
 	size_t mmap_len;
@@ -75,7 +93,9 @@ struct pmi_perf_session {
 
 typedef int (*pmi_perf_sample_cb)(const struct pmi_perf_sample *sample, void *ctx);
 
-int pmi_perf_session_open(struct pmi_perf_session *session, pid_t tid,
+struct pmi_perf_open_args pmi_perf_target_open_args(struct pmi_perf_target target);
+int pmi_perf_session_open(struct pmi_perf_session *session,
+			  struct pmi_perf_target target,
 			  const struct pmi_record_options *opts,
 			  const struct pmi_event_list *events);
 int pmi_perf_session_enable(struct pmi_perf_session *session);

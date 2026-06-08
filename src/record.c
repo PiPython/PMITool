@@ -24,7 +24,6 @@
 #include "pmi/record.h"
 #include "pmi/strutil.h"
 
-#define PMI_MAX_TRACKED_TIDS 1024
 #define PMI_THREAD_REFRESH_INTERVAL_MS 1000
 
 static volatile sig_atomic_t g_stop;
@@ -38,7 +37,7 @@ struct record_runtime {
 	struct pmi_record_options opts;
 	struct pmi_event_list events;
 	struct pmi_output_writer writer;
-	struct pmi_perf_session sessions[PMI_MAX_TRACKED_TIDS];
+	struct pmi_perf_session sessions[PMI_MAX_RECORD_TARGETS];
 	size_t session_count;
 	pid_t target_pid;
 	pid_t child_pid;
@@ -47,12 +46,14 @@ struct record_runtime {
 static void record_usage(FILE *stream)
 {
 	fprintf(stream,
-		"usage: pmi record (-p <pid> | -t <tid> | -c <cmd>) -o <file> [options]\n"
+		"usage: pmi record (-p <pid> | -t <tid> | -c <cmd> | -C <cpu-set>) -o <file> [options]\n"
 		"\n"
 		"options:\n"
 		"  -p, --pid <pid>            attach to all threads in a process\n"
 		"  -t, --tid <tid>            attach to one thread\n"
 		"  -c, --cmd <cmd>            spawn and record a shell command\n"
+		"  -C, --cpu <cpu-set>        system-wide per-CPU sampling, e.g. -C 1-4 or -C 0,2-4,7\n"
+		"                             CPU samples are merged into one raw stream; no CPU column is emitted\n"
 		"  -o, --out <file>           write raw v3 samples to a file\n"
 		"  -n, --period-insn <count>  sampling period in retired instructions\n"
 		"                             default: 1000000\n"
@@ -70,6 +71,7 @@ static void record_usage(FILE *stream)
 		"\n"
 		"examples:\n"
 		"  pmi record -p 1234 -o out.pmi\n"
+		"  pmi record -C 1-4 -n 100000 -o out.pmi\n"
 		"  pmi record -c './bench' -n 100000 -e r0010,r0011 -s full -o out.pmi\n");
 }
 
@@ -94,12 +96,37 @@ static void on_signal(int signo)
 	g_stop = 1;
 }
 
-static bool session_exists(const struct record_runtime *rt, pid_t tid)
+static const char *session_target_text(const struct pmi_perf_session *session,
+				       char *buf, size_t cap)
+{
+	if (!session || !buf || cap == 0)
+		return "";
+	if (session->target_type == PMI_PERF_TARGET_CPU)
+		snprintf(buf, cap, "cpu=%d", session->cpu);
+	else
+		snprintf(buf, cap, "tid=%d", session->tid);
+	return buf;
+}
+
+static bool tid_session_exists(const struct record_runtime *rt, pid_t tid)
 {
 	size_t i;
 
 	for (i = 0; i < rt->session_count; ++i) {
-		if (rt->sessions[i].tid == tid)
+		if (rt->sessions[i].target_type == PMI_PERF_TARGET_TID &&
+		    rt->sessions[i].tid == tid)
+			return true;
+	}
+	return false;
+}
+
+static bool cpu_session_exists(const struct record_runtime *rt, int cpu)
+{
+	size_t i;
+
+	for (i = 0; i < rt->session_count; ++i) {
+		if (rt->sessions[i].target_type == PMI_PERF_TARGET_CPU &&
+		    rt->sessions[i].cpu == cpu)
 			return true;
 	}
 	return false;
@@ -153,15 +180,20 @@ static int on_perf_sample(const struct pmi_perf_sample *sample, void *ctx)
 static int attach_tid(struct record_runtime *rt, pid_t tid)
 {
 	struct pmi_perf_session *session;
+	struct pmi_perf_target target = {
+		.type = PMI_PERF_TARGET_TID,
+		.tid = tid,
+		.cpu = -1,
+	};
 	int err;
 
-	if (rt->session_count >= PMI_MAX_TRACKED_TIDS)
+	if (rt->session_count >= PMI_MAX_RECORD_TARGETS)
 		return -ENOSPC;
-	if (session_exists(rt, tid))
+	if (tid_session_exists(rt, tid))
 		return 0;
 
 	session = &rt->sessions[rt->session_count];
-	err = pmi_perf_session_open(session, tid, &rt->opts, &rt->events);
+	err = pmi_perf_session_open(session, target, &rt->opts, &rt->events);
 	if (err)
 		return err;
 	err = pmi_perf_session_enable(session);
@@ -174,7 +206,49 @@ static int attach_tid(struct record_runtime *rt, pid_t tid)
 	return 0;
 }
 
-/* 进程模式会周期性补挂新线程；已存在的 tid 会被 session_exists 去重。 */
+static int attach_cpu(struct record_runtime *rt, int cpu)
+{
+	struct pmi_perf_session *session;
+	struct pmi_perf_target target = {
+		.type = PMI_PERF_TARGET_CPU,
+		.tid = -1,
+		.cpu = cpu,
+	};
+	int err;
+
+	if (rt->session_count >= PMI_MAX_RECORD_TARGETS)
+		return -ENOSPC;
+	if (cpu_session_exists(rt, cpu))
+		return 0;
+
+	session = &rt->sessions[rt->session_count];
+	err = pmi_perf_session_open(session, target, &rt->opts, &rt->events);
+	if (err)
+		return err;
+	err = pmi_perf_session_enable(session);
+	if (err) {
+		pmi_perf_session_close(session);
+		return err;
+	}
+
+	rt->session_count++;
+	return 0;
+}
+
+static int attach_cpus(struct record_runtime *rt)
+{
+	size_t i;
+	int err;
+
+	for (i = 0; i < rt->opts.cpu_count; ++i) {
+		err = attach_cpu(rt, rt->opts.cpus[i]);
+		if (err)
+			return err;
+	}
+	return 0;
+}
+
+/* 进程模式会周期性补挂新线程；已存在的 tid 会被 tid_session_exists 去重。 */
 static int attach_target_threads(struct record_runtime *rt, pid_t pid)
 {
 	struct pmi_tid_list tids;
@@ -228,6 +302,116 @@ static int parse_pid_value(const char *text, pid_t *out)
 		return -EINVAL;
 
 	*out = (pid_t)value;
+	return 0;
+}
+
+static int parse_cpu_value(const char *text, int *out)
+{
+	char *end = NULL;
+	long value;
+
+	if (!text || !out || text[0] < '0' || text[0] > '9')
+		return -EINVAL;
+
+	value = strtol(text, &end, 10);
+	if (!end || *end != '\0' || value < 0 || value > INT_MAX)
+		return -EINVAL;
+
+	*out = (int)value;
+	return 0;
+}
+
+static bool cpu_already_added(const int *cpus, size_t count, int cpu)
+{
+	size_t i;
+
+	for (i = 0; i < count; ++i) {
+		if (cpus[i] == cpu)
+			return true;
+	}
+	return false;
+}
+
+static int append_cpu_value(int *cpus, size_t cap, size_t *count, int cpu)
+{
+	if (!cpus || !count)
+		return -EINVAL;
+	if (cpu_already_added(cpus, *count, cpu))
+		return 0;
+	if (*count >= cap)
+		return -E2BIG;
+	cpus[(*count)++] = cpu;
+	return 0;
+}
+
+static int append_cpu_token(const char *token, int *cpus, size_t cap, size_t *count)
+{
+	char range[64];
+	char *dash;
+	int start;
+	int end;
+	int cpu;
+	int err;
+
+	if (!token || token[0] == '\0')
+		return -EINVAL;
+	if (strlen(token) >= sizeof(range))
+		return -E2BIG;
+
+	strcpy(range, token);
+	dash = strchr(range, '-');
+	if (!dash) {
+		err = parse_cpu_value(range, &start);
+		if (err)
+			return err;
+		return append_cpu_value(cpus, cap, count, start);
+	}
+
+	*dash = '\0';
+	err = parse_cpu_value(range, &start);
+	if (err)
+		return err;
+	err = parse_cpu_value(dash + 1, &end);
+	if (err)
+		return err;
+	if (end < start)
+		return -EINVAL;
+	if ((uint64_t)end - (uint64_t)start + 1 > (uint64_t)cap)
+		return -E2BIG;
+
+	for (cpu = start;; ++cpu) {
+		err = append_cpu_value(cpus, cap, count, cpu);
+		if (err)
+			return err;
+		if (cpu == end)
+			break;
+	}
+	return 0;
+}
+
+int pmi_record_parse_cpu_set(const char *arg, int *cpus, size_t cap, size_t *count)
+{
+	char copy[PMI_MAX_LINE_LEN];
+	char *cursor;
+	char *token;
+	size_t parsed = 0;
+	int err;
+
+	if (!arg || !cpus || !count || cap == 0)
+		return -EINVAL;
+	if (strlen(arg) >= sizeof(copy))
+		return -E2BIG;
+
+	strcpy(copy, arg);
+	cursor = copy;
+	while ((token = strsep(&cursor, ",")) != NULL) {
+		err = append_cpu_token(token, cpus, cap, &parsed);
+		if (err)
+			return err;
+	}
+	if (parsed == 0)
+		return -EINVAL;
+	*count = parsed;
 	return 0;
 }
 
@@ -317,6 +501,7 @@ static int parse_record_options(int argc, char **argv, struct pmi_record_options
 		{ "pid", required_argument, NULL, 'p' },
 		{ "tid", required_argument, NULL, 't' },
 		{ "cmd", required_argument, NULL, 'c' },
+		{ "cpu", required_argument, NULL, 'C' },
 		{ "out", required_argument, NULL, 'o' },
 		{ "period-insn", required_argument, NULL, 'n' },
 		{ "stack", required_argument, NULL, 's' },
@@ -338,7 +523,7 @@ static int parse_record_options(int argc, char **argv, struct pmi_record_options
 	opterr = 0;
 	optind = 1;
 
-	while ((opt = getopt_long(argc, argv, "p:t:c:o:n:e:s:k:h", long_options,
+	while ((opt = getopt_long(argc, argv, "p:t:c:C:o:n:e:s:k:h", long_options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'p':
@@ -355,6 +540,15 @@ static int parse_record_options(int argc, char **argv, struct pmi_record_options
 			break;
 		case 'c':
 			opts->cmd = optarg;
+			break;
+		case 'C':
+			if (pmi_record_parse_cpu_set(optarg, opts->cpus,
+						     sizeof(opts->cpus) /
+							     sizeof(opts->cpus[0]),
+						     &opts->cpu_count) != 0) {
+				fprintf(stderr, "invalid CPU set: %s\n", optarg);
+				return -EINVAL;
+			}
 			break;
 		case 'o':
 			opts->output_path = optarg;
@@ -417,8 +611,8 @@ static int parse_record_options(int argc, char **argv, struct pmi_record_options
 		fprintf(stderr, "-o/--out is required\n");
 		return -EINVAL;
 	}
-	if (!!opts->pid + !!opts->tid + !!opts->cmd != 1) {
-		fprintf(stderr, "exactly one of -p, -t, or -c is required\n");
+	if (!!opts->pid + !!opts->tid + !!opts->cmd + !!opts->cpu_count != 1) {
+		fprintf(stderr, "exactly one of -p, -t, -c, or -C is required\n");
 		return -EINVAL;
 	}
 	return 0;
@@ -438,21 +632,26 @@ static void close_runtime(struct record_runtime *rt)
 
 	for (i = 0; i < rt->session_count; ++i) {
 		int err;
+		char target[32];
 
 		err = pmi_perf_session_drain(&rt->sessions[i], on_perf_sample, rt);
 		if (err)
 			record_debugf(rt, "error",
-				      "stage=close-drain tid=%d leader_fd=%d err=%d (%s)",
-				      rt->sessions[i].tid,
+				      "stage=close-drain target=%s leader_fd=%d err=%d (%s)",
+				      session_target_text(&rt->sessions[i], target,
+							  sizeof(target)),
 				      rt->sessions[i].leader_fd, -err,
 				      strerror(-err));
 	}
 	for (i = 0; i < rt->session_count; ++i) {
+		char target[32];
+
 		if (rt->opts.debug_perf && rt->sessions[i].count_grew &&
 		    rt->sessions[i].samples_seen == 0) {
 			record_debugf(rt, "summary",
-				      "tid=%d count_grew=yes samples_seen=%" PRIu64 " period=%" PRIu64 " last_leader=%" PRIu64 " enabled=%" PRIu64 " running=%" PRIu64,
-				      rt->sessions[i].tid,
+				      "target=%s count_grew=yes samples_seen=%" PRIu64 " period=%" PRIu64 " last_leader=%" PRIu64 " enabled=%" PRIu64 " running=%" PRIu64,
+				      session_target_text(&rt->sessions[i], target,
+							  sizeof(target)),
 				      rt->sessions[i].samples_seen,
 				      rt->sessions[i].sample_period,
 				      rt->sessions[i].last_leader_count,
@@ -503,7 +702,7 @@ int pmi_record_main(int argc, char **argv)
 		rt.target_pid = rt.child_pid;
 	} else if (rt.opts.pid) {
 		rt.target_pid = rt.opts.pid;
-	} else {
+	} else if (rt.opts.tid) {
 		rt.target_pid = rt.opts.tid;
 	}
 
@@ -529,7 +728,9 @@ int pmi_record_main(int argc, char **argv)
 		return 1;
 	}
 
-	if (rt.opts.tid)
+	if (rt.opts.cpu_count > 0)
+		err = attach_cpus(&rt);
+	else if (rt.opts.tid)
 		err = attach_tid(&rt, rt.target_pid);
 	else
 		err = attach_target_threads(&rt, rt.target_pid);
@@ -549,7 +750,7 @@ int pmi_record_main(int argc, char **argv)
 		next_refresh_ms = monotonic_ms() + PMI_THREAD_REFRESH_INTERVAL_MS;
 
 	while (!g_stop) {
-		struct pollfd fds[PMI_MAX_TRACKED_TIDS];
+		struct pollfd fds[PMI_MAX_RECORD_TARGETS];
 		uint64_t now_ms = monotonic_ms();
 		nfds_t nfds = 0;
 		int timeout_ms = rt.opts.poll_timeout_ms;
@@ -577,9 +778,12 @@ int pmi_record_main(int argc, char **argv)
 			err = pmi_perf_session_drain(&rt.sessions[i], on_perf_sample,
 						     &rt);
 			if (err) {
+				char target[32];
+
 				record_debugf(&rt, "error",
-					      "stage=drain tid=%d leader_fd=%d err=%d (%s)",
-					      rt.sessions[i].tid,
+					      "stage=drain target=%s leader_fd=%d err=%d (%s)",
+					      session_target_text(&rt.sessions[i], target,
+								  sizeof(target)),
 					      rt.sessions[i].leader_fd, -err,
 					      strerror(-err));
 				g_stop = 1;
