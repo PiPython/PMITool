@@ -12,6 +12,12 @@
 - 支持原始样本落盘与函数级报表生成
 - `record` 默认使用低开销异步 writer，尽量减少对业务线程的阻塞
 
+## 开发文档
+
+- [代码开发说明](docs/code-development.md)
+- [开发者测试说明](docs/developer-testing.md)
+- [软件代码重构说明](docs/refactoring-notes.md)
+
 ## 构建依赖
 
 当前构建是纯 `perf_event_open` 方案。
